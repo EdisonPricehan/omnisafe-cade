@@ -19,11 +19,11 @@ from __future__ import annotations
 import json
 import os
 import warnings
-from typing import Any
+from typing import Any, List
 
 import numpy as np
 import torch
-from gymnasium.spaces import Box
+from gymnasium.spaces import Box, Discrete, MultiBinary
 from gymnasium.utils.save_video import save_video
 
 from omnisafe.algorithms.model_based.base.ensemble import EnsembleDynamicsModel
@@ -39,7 +39,7 @@ from omnisafe.common import Normalizer
 from omnisafe.envs.core import CMDP, make
 from omnisafe.envs.wrapper import ActionRepeat, ActionScale, ObsNormalize, TimeLimit
 from omnisafe.models.actor import ActorBuilder
-from omnisafe.models.actor_critic import ConstraintActorCritic, ConstraintActorQCritic
+from omnisafe.models.actor_critic import ConstraintActorCritic, ConstraintActorQCritic, ConstraintActorCriticDynamics
 from omnisafe.models.base import Actor
 from omnisafe.utils.config import Config
 
@@ -63,7 +63,7 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
         self,
         env: CMDP | None = None,
         actor: Actor | None = None,
-        actor_critic: ConstraintActorCritic | ConstraintActorQCritic | None = None,
+        actor_critic: ConstraintActorCritic | ConstraintActorQCritic | ConstraintActorCriticDynamics | None = None,
         dynamics: EnsembleDynamicsModel | None = None,
         planner: CEMPlanner
         | ARCPlanner
@@ -77,7 +77,8 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
         """Initialize an instance of :class:`Evaluator`."""
         self._env: CMDP | None = env
         self._actor: Actor | None = actor
-        self._actor_critic: ConstraintActorCritic | ConstraintActorQCritic | None = actor_critic
+        self._actor_critic: ConstraintActorCritic | ConstraintActorQCritic | ConstraintActorCriticDynamics | None = (
+            actor_critic)
         self._dynamics: EnsembleDynamicsModel | None = dynamics
         self._planner = planner
         self._dividing_line: str = '\n' + '#' * 50 + '\n'
@@ -149,6 +150,20 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
 
         observation_space = self._env.observation_space
         action_space = self._env.action_space
+
+        # Only construct CACD model
+        if hasattr(self._cfgs, 'algo') and self._cfgs['algo'] == 'FOCOPS_CACD':
+            self._actor_critic = ConstraintActorCriticDynamics(
+                obs_space=observation_space,
+                act_space=action_space,
+                model_cfgs=self._cfgs.model_cfgs,
+                epochs=1,
+            )
+            self._actor_critic.load_state_dict(model_params['actor_critic'])
+            self._actor_critic.to('cpu')
+
+            return
+
         if 'Saute' in self._cfgs['algo'] or 'Simmer' in self._cfgs['algo']:
             self._safety_budget = (
                 self._cfgs.algo_cfgs.safety_budget
@@ -182,7 +197,7 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
             'RCEPETS',
             'CCEPETS',
         ]:
-            assert isinstance(observation_space, Box), 'The observation space must be Box.'
+            assert isinstance(observation_space, (Box, Discrete, MultiBinary)), 'The observation space must be Box.'
             assert isinstance(action_space, Box), 'The action space must be Box.'
             dynamics_state_space = (
                 self._env.coordinate_observation_space
@@ -342,6 +357,57 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
 
         self.__load_model_and_env(save_dir, model_name, env_kwargs)
 
+    def mpc_planner(
+        self,
+        obs: torch.Tensor,
+        branch_num: int = 5,
+        lookahead_steps: int = 1,
+    ) -> torch.Tensor:
+        """
+        Choose the best action based on the current observation and the semantic dynamics model
+        Args:
+            obs: obs tensor, shape is of feature size
+            branch_num: trajectories to be sampled
+            lookahead_steps: steps to look ahead into the future
+
+        Returns:
+            best_act: the best current action that has the minimum summed cost value
+        """
+        # Step 1: Sample actions for the first step from the actor's distribution, shape (branch_num, action_dim)
+        actions = [self._actor_critic.predict_actor(obs, deterministic=False) for _ in range(branch_num)]
+
+        best_action = None
+        min_cost = float('inf')
+
+        for action in actions:
+            total_cost = 0
+            current_obs = obs.clone()
+            current_action = action
+
+            # Step 2: Simulate lookahead steps using SDM
+            for step in range(lookahead_steps):
+                # Get the predicted next observation using the semantic dynamics model (SDM)
+                next_obs = self._actor_critic.sdm.predict(
+                    obs_act=torch.cat([current_obs, current_action], dim=-1),
+                    round_to_int=True,
+                )
+
+                # Step 3: Evaluate cost using the cost critic
+                predicted_cost_value = self._actor_critic.cost_critic(next_obs)[0]  # Get cost for next observation
+                total_cost += predicted_cost_value.item()
+
+                # For the next step, use a deterministic action from the actor
+                current_action = self._actor_critic.predict_actor(next_obs, deterministic=True)
+                current_obs = next_obs
+
+            # Step 4: Select the action that minimizes the cumulative cost
+            if total_cost < min_cost:
+                min_cost = total_cost
+                best_action = action
+
+        # Step 5: Return the best action
+        return best_action
+
     def evaluate(
         self,
         num_episodes: int = 10,
@@ -359,7 +425,7 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
         Raises:
             ValueError: If the environment and the policy are not provided or created.
         """
-        if self._env is None or (self._actor is None and self._planner is None):
+        if self._env is None or (self._actor_critic is None and self._actor is None and self._planner is None):
             raise ValueError(
                 'The environment and the policy must be provided or created before evaluating the agent.',
             )
@@ -378,21 +444,35 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
                 if 'Saute' in self._cfgs['algo'] or 'Simmer' in self._cfgs['algo']:
                     obs = torch.cat([obs, self._safety_obs], dim=-1)
                 with torch.no_grad():
-                    if self._actor is not None:
+                    if self._actor is not None:  # FOCOPS
                         act = self._actor.predict(
                             obs,
                             deterministic=True,
                         )
+                        act = act.squeeze(0)  # remove batch dim
+                    elif self._actor_critic is not None:  # FOCOPS_CACD
+                        obs = obs.unsqueeze(0)
+
+                        # TODO switch by config
+                        # Deterministic inference
+                        act = self._actor_critic.predict_actor(obs, deterministic=True)
+
+                        # Stochastic planning
+                        # act = self.mpc_planner(obs)
+
+                        act = act.squeeze(0)  # remove batch dim
                     elif self._planner is not None:
                         act = self._planner.output_action(
                             obs.unsqueeze(0).to('cpu'),
                         )[
                             0
                         ].squeeze(0)
+                        # print(f'Evaluator {act=}')
                     else:
                         raise ValueError(
                             'The policy must be provided or created before evaluating the agent.',
                         )
+
                 obs, rew, cost, terminated, truncated, _ = self._env.step(act)
                 if 'Saute' in self._cfgs['algo'] or 'Simmer' in self._cfgs['algo']:
                     self._safety_obs -= cost.unsqueeze(-1) / self._safety_budget
@@ -467,7 +547,7 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
             self._env is not None
         ), 'The environment must be provided or created before rendering.'
         assert (
-            self._actor is not None or self._planner is not None
+            self._actor is not None or self._actor_critic is not None or self._planner is not None
         ), 'The policy or planner must be provided or created before rendering.'
         if save_replay_path is None:
             save_replay_path = os.path.join(self._save_dir, 'video', self._model_name.split('.')[0])
@@ -489,6 +569,10 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
         episode_lengths: list[float] = []
 
         for episode_idx in range(num_episodes):
+            # Reset gru latent on episode begin
+            if self._actor_critic is not None:
+                self._actor_critic.gru_latent = None
+
             self._safety_obs = torch.ones(1)
             step = 0
             done = False
@@ -499,11 +583,14 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
                 if 'Saute' in self._cfgs['algo'] or 'Simmer' in self._cfgs['algo']:
                     obs = torch.cat([obs, self._safety_obs], dim=-1)
                 with torch.no_grad():
-                    if self._actor is not None:
-                        act = self._actor.predict(
-                            obs,
-                            deterministic=True,
-                        )
+                    # if self._actor is not None:
+                    #     act = self._actor.predict(
+                    #         obs,
+                    #         deterministic=True,
+                    #     )
+                    if self._actor_critic is not None:
+                        obs = obs.unsqueeze(0)  # batch x sequence x feature
+                        act = self._actor_critic.predict_actor(obs, deterministic=True)
                     elif self._planner is not None:
                         act = self._planner.output_action(
                             obs.unsqueeze(0).to('cpu'),
@@ -514,7 +601,8 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
                         raise ValueError(
                             'The policy must be provided or created before evaluating the agent.',
                         )
-                obs, rew, cost, terminated, truncated, _ = self._env.step(act)
+                # print(f'Evaluator act: {act=}')
+                obs, rew, cost, terminated, truncated, _ = self._env.step(act[0])
                 if 'Saute' in self._cfgs['algo'] or 'Simmer' in self._cfgs['algo']:
                     self._safety_obs -= cost.unsqueeze(-1) / self._safety_budget
                     self._safety_obs /= self._cfgs.algo_cfgs.saute_gamma
@@ -534,16 +622,19 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
 
             if self._render_mode == 'rgb_array_list':
                 frames = self._env.render()
-            if save_replay_path is not None:
-                save_video(
-                    frames,
-                    save_replay_path,
-                    fps=self.fps,
-                    episode_trigger=lambda x: True,
-                    video_length=horizon,
-                    episode_index=episode_idx,
-                    name_prefix='eval',
-                )
+
+            # if save_replay_path is not None:
+            #     print(f'{self.fps=}')
+            #
+            #     save_video(
+            #         frames,
+            #         save_replay_path,
+            #         fps=self.fps,
+            #         episode_trigger=lambda x: True,
+            #         video_length=horizon,
+            #         episode_index=episode_idx,
+            #         name_prefix='eval',
+            #     )
             self._env.reset()
             frames = []
             episode_rewards.append(ep_ret)

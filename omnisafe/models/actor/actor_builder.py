@@ -22,6 +22,7 @@ from omnisafe.models.actor.gaussian_sac_actor import GaussianSACActor
 from omnisafe.models.actor.mlp_actor import MLPActor
 from omnisafe.models.actor.perturbation_actor import PerturbationActor
 from omnisafe.models.actor.vae_actor import VAE
+from omnisafe.models.actor.latent_categorical_actor import LatentCategoricalActor
 from omnisafe.models.base import Actor
 from omnisafe.typing import Activation, ActorType, InitFunction, OmnisafeSpace
 
@@ -37,6 +38,7 @@ class ActorBuilder:
         obs_space (OmnisafeSpace): The space that defines valid observations.
         act_space (OmnisafeSpace): The space that defines valid actions.
         hidden_sizes (list[int]): The number of nodes at each hidden layer in the network.
+        latent_size (int): Latent dimension of upstream recurrent network.
         activation (str, optional): The activation function used after each layer. Defaults to ``'relu'``.
         weight_initialization_mode (str, optional): The method to initialize weights in the network.
                                                     Defaults to ``'kaiming_uniform'``.
@@ -47,6 +49,7 @@ class ActorBuilder:
         obs_space: OmnisafeSpace,
         act_space: OmnisafeSpace,
         hidden_sizes: list[int],
+        latent_size: int = 128,
         activation: Activation = 'relu',
         weight_initialization_mode: InitFunction = 'kaiming_uniform',
     ) -> None:
@@ -56,6 +59,7 @@ class ActorBuilder:
         self._weight_initialization_mode: InitFunction = weight_initialization_mode
         self._activation: Activation = activation
         self._hidden_sizes: list[int] = hidden_sizes
+        self._latent_size: int = latent_size
 
     # pylint: disable-next=too-many-return-statements
     def build_actor(
@@ -126,6 +130,15 @@ class ActorBuilder:
                 self._obs_space,
                 self._act_space,
                 self._hidden_sizes,
+                activation=self._activation,
+                weight_initialization_mode=self._weight_initialization_mode,
+            )
+        if actor_type == 'latent_discrete':
+            return LatentCategoricalActor(
+                self._obs_space,
+                self._act_space,
+                self._hidden_sizes,
+                self._latent_size,
                 activation=self._activation,
                 weight_initialization_mode=self._weight_initialization_mode,
             )

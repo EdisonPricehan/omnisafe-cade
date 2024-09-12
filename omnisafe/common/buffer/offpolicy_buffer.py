@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import torch
-from gymnasium.spaces import Box
+from gymnasium.spaces import Box, Discrete, MultiBinary
 
 from omnisafe.common.buffer.base import BaseBuffer
 from omnisafe.typing import DEVICE_CPU, OmnisafeSpace
@@ -59,7 +59,7 @@ class OffPolicyBuffer(BaseBuffer):
     ) -> None:
         """Initialize an instance of :class:`OffPolicyBuffer`."""
         super().__init__(obs_space, act_space, size, device)
-        if isinstance(obs_space, Box):
+        if isinstance(obs_space, (Box, Discrete, MultiBinary)):
             self.data['next_obs'] = torch.zeros(
                 (size, *obs_space.shape),
                 dtype=torch.float32,

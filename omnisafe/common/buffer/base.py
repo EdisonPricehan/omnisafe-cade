@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 import torch
-from gymnasium.spaces import Box, Discrete
+from gymnasium.spaces import Box, Discrete, MultiBinary
 
 from omnisafe.typing import DEVICE_CPU, OmnisafeSpace
 
@@ -72,7 +72,7 @@ class BaseBuffer(ABC):
         """Initialize an instance of :class:`BaseBuffer`."""
         self._device: torch.device = device
 
-        if isinstance(obs_space, (Box, Discrete)):
+        if isinstance(obs_space, (Box, Discrete, MultiBinary)):
             obs_buf = torch.zeros(
                 (size, int(np.array(obs_space.shape).prod())),
                 dtype=torch.float32,

@@ -18,13 +18,14 @@ from __future__ import annotations
 
 import torch
 from rich.progress import track
-from torch.distributions import Normal
+from torch.distributions import Normal, Categorical
 from torch.utils.data import DataLoader, TensorDataset
 
 from omnisafe.algorithms import registry
 from omnisafe.algorithms.on_policy.base.policy_gradient import PolicyGradient
 from omnisafe.common.lagrange import Lagrange
 from omnisafe.utils import distributed
+from omnisafe.utils.math import get_dist_mean_std
 
 
 @registry.register
@@ -37,7 +38,8 @@ class FOCOPS(PolicyGradient):
         - URL: `FOCOPS <https://arxiv.org/abs/2002.06506>`_
     """
 
-    _p_dist: Normal
+    # _p_dist: Normal
+    _p_dist: Categorical
 
     def _init(self) -> None:
         """Initialize the FOCOPS specific model.
@@ -58,6 +60,7 @@ class FOCOPS(PolicyGradient):
         """
         super()._init_log()
         self._logger.register_key('Metrics/LagrangeMultiplier')
+        self._logger.register_key('Train/PolicyStd')
 
     def _loss_pi(
         self,
@@ -97,7 +100,8 @@ class FOCOPS(PolicyGradient):
         """
         distribution = self._actor_critic.actor(obs)
         logp_ = self._actor_critic.actor.log_prob(act)
-        std = self._actor_critic.actor.std
+        # std = self._actor_critic.actor.std
+        _, std = get_dist_mean_std(distribution)
         ratio = torch.exp(logp_ - logp)
 
         kl = torch.distributions.kl_divergence(distribution, self._p_dist).sum(-1, keepdim=True)
@@ -167,8 +171,9 @@ class FOCOPS(PolicyGradient):
         original_obs = obs
         with torch.no_grad():
             old_distribution = self._actor_critic.actor(obs)
-            old_mean = old_distribution.mean
-            old_std = old_distribution.stddev
+            old_logits = old_distribution.logits
+            # old_mean = old_distribution.mean
+            # old_std = old_distribution.stddev
 
         dataloader = DataLoader(
             dataset=TensorDataset(
@@ -179,8 +184,9 @@ class FOCOPS(PolicyGradient):
                 target_value_c,
                 adv_r,
                 adv_c,
-                old_mean,
-                old_std,
+                old_logits,
+                # old_mean,
+                # old_std,
             ),
             batch_size=self._cfgs.algo_cfgs.batch_size,
             shuffle=True,
@@ -196,14 +202,17 @@ class FOCOPS(PolicyGradient):
                 target_value_c,
                 adv_r,
                 adv_c,
-                old_mean,
-                old_std,
+                old_logits,
+                # old_mean,
+                # old_std,
             ) in dataloader:
                 self._update_reward_critic(obs, target_value_r)
                 if self._cfgs.algo_cfgs.use_cost:
                     self._update_cost_critic(obs, target_value_c)
 
-                self._p_dist = Normal(old_mean, old_std)
+                # self._p_dist = Normal(old_mean, old_std)
+                self._p_dist = Categorical(logits=old_logits)
+
                 self._update_actor(obs, act, logp, adv_r, adv_c)
 
             new_distribution = self._actor_critic.actor(original_obs)

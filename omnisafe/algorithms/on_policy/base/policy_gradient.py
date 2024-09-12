@@ -19,6 +19,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 from rich.progress import track
@@ -279,6 +280,32 @@ class PolicyGradient(BaseAlgo):
             # save model to disk
             if (epoch + 1) % self._cfgs.logger_cfgs.save_model_freq == 0:
                 self._logger.torch_save()
+
+        # plot and save initial state distribution
+        # state_reset_count_dict = self._env.state_reset_count()
+        # print(f'{state_reset_count_dict=}')
+        #
+        # import matplotlib.pyplot as plt
+        # grids = np.zeros((10, 10))
+        # row, col = grids.shape
+        # states = np.unravel_index(list(state_reset_count_dict.keys()), grids.shape)
+        # all_reset_counts = sum(list(state_reset_count_dict.values()))
+        # print(f'{states=}')
+        # for s in zip(states[0], states[1]):
+        #     prob = state_reset_count_dict[np.ravel_multi_index(s, grids.shape)] / all_reset_counts
+        #     grids[s] = prob
+        # fig, ax = plt.subplots()
+        # mesh = ax.pcolormesh(grids, cmap='jet', edgecolors='k', linewidth=2,
+        #                      vmin=np.min(grids), vmax=np.max(grids), alpha=0.8)
+        # ax.set_aspect('equal')
+        # fig.colorbar(mesh)
+        # for r in range(row):
+        #     for c in range(col):
+        #         ax.text(c + 0.5, r + 0.5, f'{grids[r, c]:.2f}', ha='center', va='center', weight='bold')
+        #
+        # fig.tight_layout()
+        # plt.savefig('state_reset_distribution.png', dpi=600)
+        # # plt.show()
 
         ep_ret = self._logger.get_stats('Metrics/EpRet')[0]
         ep_cost = self._logger.get_stats('Metrics/EpCost')[0]

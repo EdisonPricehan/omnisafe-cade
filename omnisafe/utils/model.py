@@ -19,7 +19,9 @@ from __future__ import annotations
 import numpy as np
 from torch import nn
 
-from omnisafe.typing import Activation, InitFunction
+from gymnasium import spaces
+
+from omnisafe.typing import Activation, InitFunction, OmnisafeSpace
 
 
 def initialize_layer(init_function: InitFunction, layer: nn.Linear) -> None:
@@ -68,6 +70,42 @@ def get_activation(
     }
     assert activation in activations
     return activations[activation]
+
+
+def get_obs_dim(obs_space: OmnisafeSpace) -> int:
+    """
+    Get the size of the observation space
+    Args:
+        obs_space: the observation space that belongs to OmnisafeSpace.
+
+    Returns:
+        The observation size in integer.
+    """
+    if isinstance(obs_space, spaces.Box):
+        return int(np.array(obs_space.shape[0]).prod())
+    elif isinstance(obs_space, spaces.Discrete):
+        return 1
+    elif isinstance(obs_space, spaces.MultiBinary):
+        return int(obs_space.n)
+    else:
+        raise NotImplementedError
+
+
+def get_act_dim(act_space: OmnisafeSpace, execution_dim: bool = False) -> int:
+    """
+    Get the size of the action space
+    Args:
+        act_space: the action space that belongs to OmnisafeSpace.
+        execution_dim: if enabled, returns 1 for discrete action space
+    Returns:
+        The action size in integer
+    """
+    if isinstance(act_space, spaces.Box):
+        return int(np.array(act_space.shape[0]).prod())
+    elif isinstance(act_space, spaces.Discrete):
+        return 1 if execution_dim else int(act_space.n)
+    else:
+        raise NotImplementedError
 
 
 def build_mlp_network(

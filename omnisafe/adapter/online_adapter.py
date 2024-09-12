@@ -16,8 +16,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, Union, Tuple, List
 
+import numpy
 import torch
 
 from omnisafe.envs.core import CMDP, make, support_envs
@@ -62,7 +63,7 @@ class OnlineAdapter:
         self._cfgs: Config = cfgs
         self._device: torch.device = get_device(cfgs.train_cfgs.device)
         self._env_id: str = env_id
-        self._env: CMDP = make(env_id, num_envs=num_envs, device=self._device)
+        self._env: CMDP = make(env_id, num_envs=num_envs, device=self._device, render_mode=cfgs.train_cfgs.render_mode)
         self._eval_env: CMDP = make(env_id, num_envs=1, device=self._device)
 
         self._wrapper(
@@ -198,3 +199,9 @@ class OnlineAdapter:
             The saved components of environment, e.g., ``obs_normalizer``.
         """
         return self._env.save()
+
+    def state_reset_count(self) -> Dict[int, int]:
+        return self._env.state_reset_count()
+
+    def get_state_from_obs(self, obs: Union[Tuple[int, ...], numpy.ndarray]) -> List[int] | None:
+        return self._env.get_state_from_obs(obs)

@@ -27,17 +27,20 @@ defaults:
     # number of parallel agent, similar to a3c
     parallel: 1
     # total number of steps to train
-    total_steps: 10000000
+    total_steps: 300000
+    # render mode, can be 'human' or None
+    render_mode: None
+#    render_mode: human
   # algorithm configurations
   algo_cfgs:
     # number of steps to update the policy
-    steps_per_epoch: 20000
+    steps_per_epoch: 500
     # number of iterations to update the policy
-    update_iters: 40
+    update_iters: 10
     # batch size for each iteration
     batch_size: 64
     # target kl divergence
-    target_kl: 0.02
+    target_kl: 2.0
     # entropy coefficient
     entropy_coef: 0.0
     # normalize reward
@@ -45,11 +48,11 @@ defaults:
     # normalize cost
     cost_normalize: False
     # normalize observation
-    obs_normalize: True
+    obs_normalize: False
     # early stop when kl divergence is bigger than target kl
     kl_early_stop: True
     # The threshold for KL divergence in each policy update
-    focops_eta: 0.02
+    focops_eta: 2.0
     # The hyperparameters related to the greediness of the algorithm
     focops_lam: 1.5
     # use max gradient norm
@@ -57,7 +60,7 @@ defaults:
     # max gradient norm
     max_grad_norm: 40.0
     # use critic norm
-    use_critic_norm: True
+    use_critic_norm: False
     # critic norm coefficient
     critic_norm_coef: 0.001
     # reward discount factor
@@ -71,11 +74,14 @@ defaults:
     # clip ratio
     clip: 0.2
     # advantage estimation method, options: gae, retrace
-    adv_estimation_method: gae
+#    adv_estimation_method: gae
+#    adv_estimation_method: plain
+#    adv_estimation_method: gae-rtg
+    adv_estimation_method: vtrace
     # standardize reward advantage
-    standardized_rew_adv: True
+    standardized_rew_adv: False
     # standardize cost advantage
-    standardized_cost_adv: True
+    standardized_cost_adv: False
     # penalty coefficient
     penalty_coef: 0.0
     # use cost
@@ -83,11 +89,11 @@ defaults:
   # logger configurations
   logger_cfgs:
     # use wandb for logging
-    use_wandb: False
+    use_wandb: True
     # wandb project name
-    wandb_project: omnisafe
+    wandb_project: cacd
     # use tensorboard for logging
-    use_tensorboard: True
+    use_tensorboard: False
     # save model frequency
     save_model_freq: 100
     # save logger path
@@ -99,9 +105,9 @@ defaults:
     # weight initialization mode
     weight_initialization_mode: "kaiming_uniform"
     # actor type, options: gaussian, gaussian_learning
-    actor_type: gaussian_learning
+    actor_type: discrete
     # linear learning rate decay
-    linear_lr_decay: True
+    linear_lr_decay: False
     # exploration noise anneal
     exploration_noise_anneal: False
     # std upper bound, and lower bound
@@ -111,11 +117,17 @@ defaults:
       # hidden layer sizes
       hidden_sizes: [64, 64]
       # activation function
-      activation: tanh
-      # out_activation: tanh
+      activation: relu
       # learning rate
       lr: 0.0003
     critic:
+      # hidden layer sizes
+      hidden_sizes: [64, 64]
+      # activation function
+      activation: relu
+      # learning rate
+      lr: 0.0003
+    dynamics:
       # hidden layer sizes
       hidden_sizes: [64, 64]
       # activation function
@@ -125,11 +137,11 @@ defaults:
   # lagrangian configurations
   lagrange_cfgs:
     # Tolerance of constraint violation
-    cost_limit: 25.0
+    cost_limit: 1.5
     # Initial value of lagrangian multiplier
     lagrangian_multiplier_init: 0.001
     # Learning rate of lagrangian multiplier
-    lambda_lr: 0.035
+    lambda_lr: 0.001
     # Type of lagrangian optimizer
     lambda_optimizer: "Adam"
     # The upper bound of lagrange multiplier

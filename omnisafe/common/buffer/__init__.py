@@ -17,14 +17,18 @@
 from omnisafe.common.buffer.base import BaseBuffer
 from omnisafe.common.buffer.offpolicy_buffer import OffPolicyBuffer
 from omnisafe.common.buffer.onpolicy_buffer import OnPolicyBuffer
+from omnisafe.common.buffer.onpolicy_cacd_buffer import OnPolicyCACDBuffer
 from omnisafe.common.buffer.vector_offpolicy_buffer import VectorOffPolicyBuffer
 from omnisafe.common.buffer.vector_onpolicy_buffer import VectorOnPolicyBuffer
+from omnisafe.common.buffer.vector_onpolicy_cacd_buffer import VectorOnPolicyCACDBuffer
 
 
 __all__ = [
     'BaseBuffer',
     'OffPolicyBuffer',
     'OnPolicyBuffer',
+    'OnPolicyCACDBuffer',
     'VectorOffPolicyBuffer',
     'VectorOnPolicyBuffer',
+    'VectorOnPolicyCACDBuffer',
 ]

@@ -25,6 +25,7 @@ from gymnasium import spaces
 from torch.distributions import Distribution
 
 from omnisafe.typing import Activation, InitFunction, OmnisafeSpace
+from omnisafe.utils.model import get_obs_dim, get_act_dim
 
 
 class Actor(nn.Module, ABC):
@@ -63,17 +64,21 @@ class Actor(nn.Module, ABC):
         self._activation: Activation = activation
         self._hidden_sizes: list[int] = hidden_sizes
         self._after_inference: bool = False
-        if isinstance(self._obs_space, (spaces.Box, spaces.Discrete)):
-            self._obs_dim: int = int(np.array(self._obs_space.shape).prod())
-        else:
-            raise NotImplementedError
 
-        if isinstance(self._act_space, spaces.Box) and len(self._act_space.shape) == 1:
-            self._act_dim: int = self._act_space.shape[0]
-        elif isinstance(self._act_space, spaces.Discrete):
-            self._act_dim = int(self._act_space.n)
-        else:
-            raise NotImplementedError
+        self._obs_dim: int = get_obs_dim(self._obs_space)
+        self._act_dim: int = get_act_dim(self._act_space)
+
+        # if isinstance(self._obs_space, (spaces.Box, spaces.Discrete, spaces.MultiBinary)):
+        #     self._obs_dim: int = int(np.array(self._obs_space.shape).prod())
+        # else:
+        #     raise NotImplementedError
+        #
+        # if isinstance(self._act_space, spaces.Box) and len(self._act_space.shape) == 1:
+        #     self._act_dim: int = self._act_space.shape[0]
+        # elif isinstance(self._act_space, spaces.Discrete):
+        #     self._act_dim = int(self._act_space.n)
+        # else:
+        #     raise NotImplementedError
 
     @abstractmethod
     def _distribution(self, obs: torch.Tensor) -> Distribution:
@@ -202,16 +207,6 @@ class Critic(nn.Module, ABC):
         self._num_critics: int = num_critics
         self._use_obs_encoder: bool = use_obs_encoder
 
-        if isinstance(self._obs_space, spaces.Box) and len(self._obs_space.shape) == 1:
-            self._obs_dim: int = self._obs_space.shape[0]
-        elif isinstance(self._obs_space, spaces.Discrete):
-            self._obs_dim = 1
-        else:
-            raise NotImplementedError
+        self._obs_dim: int = get_obs_dim(self._obs_space)
+        self._act_dim: int = get_act_dim(self._act_space, execution_dim=True)
 
-        if isinstance(self._act_space, spaces.Box) and len(self._act_space.shape) == 1:
-            self._act_dim: int = self._act_space.shape[0]
-        elif isinstance(self._act_space, spaces.Discrete):
-            self._act_dim = int(self._act_space.n)
-        else:
-            raise NotImplementedError

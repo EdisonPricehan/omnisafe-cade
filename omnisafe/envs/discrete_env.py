@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Dict, Union, List, Tuple
 
 import gymnasium
 import numpy as np
@@ -63,6 +63,9 @@ class DiscreteEnv(CMDP):
     _support_envs: ClassVar[list[str]] = [
         'CartPole-v1',
         'Taxi-v3',
+        'CliffWalking-v0',
+        'CliffCircular-v0',
+        'CliffCircular-v1',
     ]
 
     def __init__(
@@ -90,12 +93,17 @@ class DiscreteEnv(CMDP):
             self._action_space = self._env.single_action_space
             self._observation_space = self._env.single_observation_space  # type: ignore
         else:
-            self.need_time_limit_wrapper = True
-            self.need_auto_reset_wrapper = True
-            self._env = gymnasium.make(id=env_id, autoreset=True, render_mode=kwargs.get('render_mode'))  # type: ignore
+            self._env = gymnasium.make(id=env_id, render_mode=kwargs.get('render_mode'))  # type: ignore
+            # self._env = gymnasium.make(id=env_id, autoreset=True, render_mode='human')  # type: ignore
             self._action_space = self._env.action_space  # type: ignore
+            # self._action_space = spaces.Box(-1, 1, (1,))
             self._observation_space = self._env.observation_space  # type: ignore
+
+            print(f'Obs space: {self.observation_space}')
+            print(f'Action space: {self.action_space}')
+
         self._metadata = self._env.metadata
+        self._metadata['render_fps'] = 5  # default is 30, too fast to see agent moves
 
     def step(
         self,
@@ -127,15 +135,35 @@ class DiscreteEnv(CMDP):
             truncated: Whether the episode has been truncated due to a time limit.
             info: Some information logged by the environment.
         """
-        obs, reward, terminated, truncated, info = self._env.step(
-            action.detach().cpu().squeeze().numpy(),
-        )
-        obs, reward, terminated, truncated = (
+        act = action.detach().cpu().numpy()[0]
+        # print(f'Discrete action: {act}')
+
+        # act = action.detach().cpu().numpy()
+        # print(f'Box action: {act}')
+
+        # discretize box action [-1, 1] to discrete action [0, 4]
+        # act = int(np.rint((act + 1) * 2))
+        # print(f'Discrete action: {act}')
+        # assert 0 <= act <= 4, f'Step action {act} not in range!'
+
+        obs, reward, terminated, truncated, info = self._env.step(act)
+
+        # Adapt to gymnasium environments whose step function does not return cost explicitly
+        if 'cost' in info:
+            cost = info['cost']
+        else:
+            cost = 0
+            # print('cost' in info, f'cost is not in the info dict, keys are {info.keys()}!')
+
+        # print(f'{act=} {reward=} {cost=} {terminated=} {truncated=}')
+
+        obs, reward, cost, terminated, truncated = (
             torch.as_tensor(x, dtype=torch.float32, device=self._device)
-            for x in (obs, reward, terminated, truncated)
+            for x in (obs, reward, cost, terminated, truncated)
         )
         if isinstance(self._observation_space, spaces.Discrete):
             obs = obs.unsqueeze(-1)
+
         if 'final_observation' in info:
             if isinstance(info['final_observation'], np.ndarray):
                 info['final_observation'] = np.array(
@@ -152,7 +180,7 @@ class DiscreteEnv(CMDP):
             if isinstance(self._observation_space, spaces.Discrete):
                 info['final_observation'] = info['final_observation'].unsqueeze(-1)
 
-        return obs, reward, torch.zeros_like(reward), terminated, truncated, info
+        return obs, reward, cost, terminated, truncated, info
 
     def reset(
         self,
@@ -207,3 +235,10 @@ class DiscreteEnv(CMDP):
     def close(self) -> None:
         """Close the environment."""
         self._env.close()
+
+    def state_reset_count(self) -> Dict[int, int]:
+        return self._env.state_reset_count()
+
+    def get_state_from_obs(self, obs: Union[Tuple[int, ...], np.ndarray]) -> List[int] | None:
+        return self._env.get_state_from_obs(obs)
+

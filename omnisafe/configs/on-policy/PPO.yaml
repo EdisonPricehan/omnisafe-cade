@@ -156,3 +156,34 @@ Taxi-v3:
   model_cfgs:
     # actor type, options: gaussian, gaussian_learning
     actor_type: "discrete"
+
+CliffCircular-v0:
+  seed: 0
+  train_cfgs:
+    device: cpu
+    total_steps: 300000
+    time_limit: 256
+  algo_cfgs:
+    steps_per_epoch: 256
+    update_iters: 20
+    batch_size: 256
+    entropy_coef: 0.0
+    lam: 0.8
+    obs_normalize: False
+    use_critic_norm: False
+    standardized_rew_adv: False
+    standardized_cost_adv: False
+    use_cost: False
+  logger_cfgs:
+    use_wandb: True
+    wandb_project: CliffCircular
+    save_model_freq: 300
+  model_cfgs:
+    actor_type: "discrete"  # gaussian_learning
+    actor:
+      activation: relu
+      lr: 0.001
+    critic:
+      activation: relu
+      lr: 0.001
+

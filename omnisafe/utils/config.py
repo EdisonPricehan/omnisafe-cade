@@ -280,7 +280,8 @@ def __check_env_configs(configs: Config, env_type: str) -> None:
     """
     if env_type == 'discrete':
         assert (
-            configs.model_cfgs.actor_type == 'discrete'
+            configs.model_cfgs.actor_type == 'discrete' or
+            configs.model_cfgs.actor_type == 'latent_discrete'
         ), 'Discrete environments only support discrete actor!'
         assert configs.algo in [
             'NaturalPG',
@@ -298,6 +299,8 @@ def __check_env_configs(configs: Config, env_type: str) -> None:
             'TRPOPID',
             'CPO',
             'PCPO',
+            'FOCOPS',
+            'FOCOPS_CACD',
         ], f'Currently, OmniSafe does not support {configs.algo} running on discrete environments!'
     if env_type == 'box':
         assert (
@@ -407,6 +410,7 @@ def __check_algo_configs(configs: Config, algo_type: str) -> None:
             'gae-rtg',
             'vtrace',
             'plain',
+            'subm',
         ], "adv_estimation_method must be string, and it values must be ['gae','gae-rtg','vtrace','plain']"
         assert isinstance(configs.standardized_rew_adv, bool) and isinstance(
             configs.standardized_cost_adv,

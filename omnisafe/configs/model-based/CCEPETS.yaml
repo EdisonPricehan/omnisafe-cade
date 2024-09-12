@@ -122,6 +122,41 @@ defaults:
     # save model path
     window_lens: 100
 
+CliffCircular-v0:
+  seed: 0
+  train_cfgs:
+    device: cpu
+    total_steps: 10000
+  dynamics_cfgs:
+    hidden_size: 8
+    batch_size: 256
+    use_cost: True
+  planner_cfgs:
+    plan_horizon: 5
+    num_samples: 10
+    num_elites: 2
+  evaluation_cfgs:
+    use_eval: False
+  algo_cfgs:
+    steps_per_epoch: 256
+    action_repeat: 1
+    update_dynamics_cycle: 256
+    start_learning_steps: 1000
+  logger_cfgs:
+    use_wandb: False
+    wandb_project: model-based
+    use_tensorboard: False
+    save_model_freq: 15
+    window_lens: 10
+  model_cfgs:
+    actor_type: "discrete"  # gaussian_learning
+    actor:
+      activation: relu
+      lr: 0.001
+    critic:
+      activation: relu
+      lr: 0.001
+
 SafetyAntVelocity-v1:
   algo_cfgs:
     action_repeat: 1

@@ -16,10 +16,40 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Tuple, Optional
 
 import torch
-from torch.distributions import Normal, TanhTransform, TransformedDistribution, constraints
+from torch.distributions import Distribution, Categorical, Normal, TanhTransform, TransformedDistribution, constraints
+
+
+class SlidingWindowFilter:
+    def __init__(self, window_size: int = 10):
+        assert window_size >= 0, f'Sliding window length should be non-negative, given {window_size}.'
+
+        self.window_size: int = window_size
+        self.data: list[float] = []
+
+    def mean(self, cur_value: Optional[float] = None) -> float:
+        if cur_value is not None:
+            self.data.append(cur_value)
+
+            if self.window_size != 0 and len(self.data) > self.window_size:
+                self.data.pop(0)
+
+        return sum(self.data) / len(self.data)
+
+
+def get_dist_mean_std(dist: Distribution) -> Tuple[torch.Tensor, torch.Tensor]:
+    if isinstance(dist, Categorical):
+        probs = dist.probs
+        categories = torch.arange(probs.size(-1)).float()
+        mean = torch.sum(probs * categories, dim=-1)  # Shape: (N,)
+        mean_squared = torch.sum(probs * categories ** 2, dim=-1)
+        variance = mean_squared - mean ** 2  # Shape: (N,)
+        stddev = torch.sqrt(variance)  # Shape: (N,)
+        return mean, stddev
+    else:
+        raise NotImplementedError
 
 
 def get_transpose(tensor: torch.Tensor) -> torch.Tensor:

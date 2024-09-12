@@ -19,6 +19,7 @@ from __future__ import annotations
 from omnisafe.models.base import Critic
 from omnisafe.models.critic.q_critic import QCritic
 from omnisafe.models.critic.v_critic import VCritic
+from omnisafe.models.critic.r_critic import RCritic
 from omnisafe.typing import Activation, CriticType, InitFunction, OmnisafeSpace
 
 
@@ -36,6 +37,7 @@ class CriticBuilder:
     Args:
         obs_space (OmnisafeSpace): Observation space.
         act_space (OmnisafeSpace): Action space.
+        latent_size (int): Latent dimension of upstream recurrent network.
         hidden_sizes (list of int): List of hidden layer sizes.
         activation (Activation, optional): Activation function. Defaults to ``'relu'``.
         weight_initialization_mode (InitFunction, optional): Weight initialization mode. Defaults to
@@ -51,6 +53,7 @@ class CriticBuilder:
         obs_space: OmnisafeSpace,
         act_space: OmnisafeSpace,
         hidden_sizes: list[int],
+        latent_size: int = 128,  # only for r critic
         activation: Activation = 'relu',
         weight_initialization_mode: InitFunction = 'kaiming_uniform',
         num_critics: int = 1,
@@ -61,6 +64,7 @@ class CriticBuilder:
         self._act_space: OmnisafeSpace = act_space
         self._weight_initialization_mode: InitFunction = weight_initialization_mode
         self._activation: Activation = activation
+        self._latent_size: int = latent_size
         self._hidden_sizes: list[int] = hidden_sizes
         self._num_critics: int = num_critics
         self._use_obs_encoder: bool = use_obs_encoder
@@ -102,7 +106,16 @@ class CriticBuilder:
                 weight_initialization_mode=self._weight_initialization_mode,
                 num_critics=self._num_critics,
             )
-
+        if critic_type == 'r':  # reward critic
+            return RCritic(
+                obs_space=self._obs_space,
+                act_space=self._act_space,
+                latent_size=self._latent_size,
+                hidden_sizes=self._hidden_sizes,
+                activation=self._activation,
+                weight_initialization_mode=self._weight_initialization_mode,
+                num_critics=self._num_critics,
+            )
         raise NotImplementedError(
             f'critic_type "{critic_type}" is not implemented.'
             'Available critic types are: "q", "v".',

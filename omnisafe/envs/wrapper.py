@@ -586,7 +586,7 @@ class Unsqueeze(Wrapper):
         assert self.num_envs == 1, 'Unsqueeze only works with single environment'
         assert isinstance(
             self.observation_space,
-            (spaces.Box, spaces.Discrete),
+            (spaces.Box, spaces.Discrete, spaces.MultiBinary),
         ), 'Observation space must be Box or Discrete'
 
     def step(

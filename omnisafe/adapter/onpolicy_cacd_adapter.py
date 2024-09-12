@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""OnPolicy Adapter for OmniSafe."""
+"""OnPolicy CACD (Constrained Actor Critic Dynamics) Adapter for OmniSafe."""
 
 from __future__ import annotations
 
@@ -24,11 +24,11 @@ from rich.progress import track
 from omnisafe.adapter.online_adapter import OnlineAdapter
 from omnisafe.common.buffer import VectorOnPolicyBuffer
 from omnisafe.common.logger import Logger
-from omnisafe.models.actor_critic.constraint_actor_critic import ConstraintActorCritic
+from omnisafe.models.actor_critic.constraint_actor_critic_dynamics import ConstraintActorCriticDynamics
 from omnisafe.utils.config import Config
 
 
-class OnPolicyAdapter(OnlineAdapter):
+class OnPolicyCACDAdapter(OnlineAdapter):
     """OnPolicy Adapter for OmniSafe.
 
     :class:`OnPolicyAdapter` is used to adapt the environment to the on-policy training.
@@ -55,10 +55,13 @@ class OnPolicyAdapter(OnlineAdapter):
         super().__init__(env_id, num_envs, seed, cfgs)
         self._reset_log()
 
+        self.gru_layer_num: int = cfgs.model_cfgs.num_gru_layers
+        self.gru_latent_size: int = cfgs.model_cfgs.latent_size
+
     def rollout(  # pylint: disable=too-many-locals
         self,
         steps_per_epoch: int,
-        agent: ConstraintActorCritic,
+        agent: ConstraintActorCriticDynamics,
         buffer: VectorOnPolicyBuffer,
         logger: Logger,
     ) -> None:
@@ -70,34 +73,44 @@ class OnPolicyAdapter(OnlineAdapter):
 
         Args:
             steps_per_epoch (int): Number of steps per epoch.
-            agent (ConstraintActorCritic): Constraint actor-critic, including actor , reward critic
-                and cost critic.
+            agent (ConstraintActorCriticDynamics): Constraint actor-critic dynamics, including actor , reward critic,
+            cost critic and semantic dynamics model.
             buffer (VectorOnPolicyBuffer): Vector on-policy buffer.
             logger (Logger): Logger, to log ``EpRet``, ``EpCost``, ``EpLen``.
         """
         self._reset_log()
 
         obs, _ = self.reset()
+        latent = None
+
         for step in track(
             range(steps_per_epoch),
             description=f'Processing rollout for epoch: {logger.current_epoch}...',
         ):
-            act, value_r, value_c, logp = agent.step(obs)
+            # Step CACD
+            act, logp, reward_pred, cost_value_pred, latent = agent.step(obs, latent)
+
+            # Step environment
             next_obs, reward, cost, terminated, truncated, info = self.step(act)
+
+            # print(f'{next_obs.shape=}')
+            # print(f'{step=} {act=} {reward=} {cost=} {terminated=} {truncated=}')
 
             self._log_value(reward=reward, cost=cost, info=info)
 
             if self._cfgs.algo_cfgs.use_cost:
-                logger.store({'Value/cost': value_c})
-            logger.store({'Value/reward': value_r})
+                logger.store({'Value/cost': cost_value_pred})
+            logger.store({'Value/reward': reward_pred})
 
             buffer.store(
                 obs=obs,
                 act=act,
                 reward=reward,
                 cost=cost,
-                value_r=value_r,
-                value_c=value_c,
+                done=terminated or truncated,
+                reward_pred=reward_pred,
+                value_c=cost_value_pred,
+                next_obs=next_obs,
                 logp=logp,
             )
 
@@ -105,20 +118,20 @@ class OnPolicyAdapter(OnlineAdapter):
             epoch_end = step >= steps_per_epoch - 1
             for idx, (done, time_out) in enumerate(zip(terminated, truncated)):
                 if epoch_end or done or time_out:
-                    last_value_r = torch.zeros(1)
+                    last_r = torch.zeros(1)
                     last_value_c = torch.zeros(1)
                     # if not done:
-                    #     if epoch_end:
-                    #         logger.log(
-                    #             f'Warning: trajectory cut off when rollout by epoch at {self._ep_len[idx]} steps.',
-                    #         )
-                    #         _, last_value_r, last_value_c, _ = agent.step(obs[idx])
-                    #     if time_out:
-                    #         _, last_value_r, last_value_c, _ = agent.step(
-                    #             info['final_observation'][idx],
-                    #         )
-                    #     last_value_r = last_value_r.unsqueeze(0)
-                    #     last_value_c = last_value_c.unsqueeze(0)
+                        # if epoch_end:
+                        #     logger.log(
+                        #         f'Warning: trajectory cut off when rollout by epoch at {self._ep_len[idx]} steps.',
+                        #     )
+                        #     _, last_r, last_value_c, _ = agent.step(obs[idx])
+                        # if time_out:
+                        #     _, last_r, last_value_c, _ = agent.step(
+                        #         info['final_observation'][idx],
+                        #     )
+                        # last_r = last_r.unsqueeze(0)
+                        # last_value_c = last_value_c.unsqueeze(0)
 
                     if done or time_out:
                         obs, _ = self.reset()
@@ -130,7 +143,11 @@ class OnPolicyAdapter(OnlineAdapter):
                         self._ep_cost[idx] = 0.0
                         self._ep_len[idx] = 0.0
 
-                    buffer.finish_path(last_value_r, last_value_c, idx)
+                    buffer.finish_path(last_r, last_value_c, idx)
+
+                    # Reset latent for next episode
+                    # latent = self._init_latent()
+                    latent = None
 
     def _log_value(
         self,
