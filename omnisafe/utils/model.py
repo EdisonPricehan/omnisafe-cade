@@ -104,6 +104,8 @@ def get_act_dim(act_space: OmnisafeSpace, execution_dim: bool = False) -> int:
         return int(np.array(act_space.shape[0]).prod())
     elif isinstance(act_space, spaces.Discrete):
         return 1 if execution_dim else int(act_space.n)
+    elif isinstance(act_space, spaces.MultiDiscrete):
+        return len(act_space.nvec) if execution_dim else sum(act_space.nvec)
     else:
         raise NotImplementedError
 

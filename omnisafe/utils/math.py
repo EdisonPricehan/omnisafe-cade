@@ -16,9 +16,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Tuple, Optional
+from typing import Any, Callable, Tuple, Optional, List
 
 import torch
+import torch.nn.functional as F
 from torch.distributions import Distribution, Categorical, Normal, TanhTransform, TransformedDistribution, constraints
 
 
@@ -39,6 +40,46 @@ class SlidingWindowFilter:
         return sum(self.data) / len(self.data)
 
 
+def l1_loss(mask1: torch.Tensor, mask2: torch.Tensor) -> torch.Tensor:
+    return F.l1_loss(mask1, mask2)
+
+
+def iou_loss(mask1: torch.Tensor, mask2: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+    # Check dimension
+    if mask1.dim() >= 4:
+        assert mask1.shape[1] == 1, f'Channel dim should be 1, {mask1.shape=}'
+        mask1 = mask1.squeeze(1)  # Remove the channel dimension
+    elif mask1.dim() == 3:
+        assert mask1.shape[0] == 1, f'Channel dim should be 1, {mask1.shape=}'
+    elif mask1.dim() == 1:
+        mask1 = mask1.view(1, -1)  # Treat as a single flat mask
+
+    if mask2.dim() >= 4:
+        assert mask2.shape[1] == 1, f'Channel dim should be 1, {mask2.shape=}'
+        mask2 = mask2.squeeze(1)  # Remove the channel dimension
+    elif mask2.dim() == 3:
+        assert mask2.shape[0] == 1, f'Channel dim should be 1, {mask2.shape=}'
+    elif mask2.dim() == 1:
+        mask2 = mask2.view(1, -1)  # Treat as a single flat mask
+
+    # Ensure masks are boolean tensors
+    mask1 = mask1 > threshold
+    mask2 = mask2 > threshold
+
+    # Flatten masks for IoU calculation if they aren't already flat
+    mask1_flat = mask1.view(mask1.size(0), -1) if mask1.dim() > 1 else mask1
+    mask2_flat = mask2.view(mask2.size(0), -1) if mask2.dim() > 1 else mask2
+
+    # Calculate intersection and union
+    intersection = torch.sum(mask1_flat & mask2_flat, dim=1).float()
+    union = torch.sum(mask1_flat | mask2_flat, dim=1).float()
+
+    # Avoid division by zero
+    iou = intersection / (union + 1e-6)
+
+    return iou
+
+
 def get_dist_mean_std(dist: Distribution) -> Tuple[torch.Tensor, torch.Tensor]:
     if isinstance(dist, Categorical):
         probs = dist.probs
@@ -47,10 +88,47 @@ def get_dist_mean_std(dist: Distribution) -> Tuple[torch.Tensor, torch.Tensor]:
         mean_squared = torch.sum(probs * categories ** 2, dim=-1)
         variance = mean_squared - mean ** 2  # Shape: (N,)
         stddev = torch.sqrt(variance)  # Shape: (N,)
-        return mean, stddev
+        return torch.mean(mean), torch.mean(stddev)
     else:
         raise NotImplementedError
 
+
+def get_multi_dist_mean_std(dists: List[Distribution]) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    assert len(dists) > 0, f'Received empty distributions!'
+
+    means = []
+    stddevs = []
+    for dist in dists:
+        mean, stddev = get_dist_mean_std(dist)
+        means.append(mean)
+        stddevs.append(stddev)
+
+    return means, stddevs
+
+
+def kld_multi_categorical(
+    dist_p: List[Categorical],
+    dist_q: List[Categorical],
+) -> torch.Tensor:
+    assert len(dist_p) == len(dist_q), f'Two distributions size do not match!'
+
+    klds = []
+    for dp, dq in zip(dist_p, dist_q):
+        kld = torch.distributions.kl.kl_divergence(dp, dq).sum(-1, keepdim=True).mean()
+        klds.append(kld)
+
+    return torch.mean(torch.stack(klds), dim=0)
+
+
+def logits_from_multi_categorical(
+    dists: List[Categorical],
+) -> torch.Tensor:
+    assert len(dists) > 0, f'List of distributions is empty!'
+
+    logits = torch.cat([dist.logits for dist in dists], dim=-1)
+    # print(f'{logits.shape=}')
+
+    return logits
 
 def get_transpose(tensor: torch.Tensor) -> torch.Tensor:
     """Transpose the last two dimensions of a tensor.

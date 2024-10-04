@@ -15,7 +15,7 @@
 
 defaults:
   # seed for random number generator
-  seed: 0
+  seed: 2
   # training configurations
   train_cfgs:
     # device to use for training, options: cpu, cuda, cuda:0, cuda:0,1, etc.
@@ -85,15 +85,17 @@ defaults:
     clip: 0.2
     # advantage estimation method, options: gae, retrace
 #    adv_estimation_method: gae
-#    adv_estimation_method: gae-rtg
+    adv_estimation_method: gae-rtg
 #    adv_estimation_method: vtrace
-    adv_estimation_method: subm
+#    adv_estimation_method: plain
+#    adv_estimation_method: subm
     # standardize reward advantage
     standardized_rew_adv: False
     # standardize cost advantage
     standardized_cost_adv: False
     # episode mean sliding window size
     ep_ret_window_size: 10
+#    ep_ret_window_size: 15
 #    ep_ret_window_size: 30
 #    ep_ret_window_size: 5
     # penalty coefficient
@@ -101,13 +103,13 @@ defaults:
     # use cost
     use_cost: True
     # use semantic dynamics model
-    use_sdm: True
+    use_sdm: False
   # logger configurations
   logger_cfgs:
     # use wandb for logging
     use_wandb: True
     # wandb project name
-    wandb_project: cacd-model
+    wandb_project: cacd-cliffcircular
     # use tensorboard for logging
     use_tensorboard: False
     # save model frequency
@@ -169,14 +171,50 @@ defaults:
     cost_limit: 1.5
 #    cost_limit: 1.0
 #    cost_limit: 2.0
+#    cost_limit: 2.5
+#    cost_limit: 3.0
     # Initial value of lagrangian multiplier
     lagrangian_multiplier_init: 0.001
     # Learning rate of lagrangian multiplier
 #    lambda_lr: 0.0035
-    lambda_lr: 0.0003
-#    lambda_lr: 0.001
+#    lambda_lr: 0.0003
+    lambda_lr: 0.001
 #    lambda_lr: 0.01
     # Type of lagrangian optimizer
     lambda_optimizer: "Adam"
     # The upper bound of lagrange multiplier
     lagrangian_upper_bound: 2.0
+
+Medium:
+  train_cfgs:
+    # total number of steps to train
+    total_steps: 200000
+    # maximum number of steps per episode
+    max_episode_steps: 512
+  algo_cfgs:
+    # number of steps to update the policy
+    steps_per_epoch: 1024
+    # batch size for each iteration
+    batch_size: 128
+    # advantage estimation method, options: gae, retrace
+    adv_estimation_method: gae
+#    adv_estimation_method: gae-rtg
+#    adv_estimation_method: vtrace
+#    adv_estimation_method: subm
+    # episode mean sliding window size
+    ep_ret_window_size: 10
+    # use semantic dynamics model
+    use_sdm: False
+  logger_cfgs:
+    # use wandb for logging
+    use_wandb: False
+    # wandb project name
+    wandb_project: cacd-riverine
+    # save model frequency
+    save_model_freq: 50
+  model_cfgs:
+    actor_type: latent_multi_discrete
+  lagrange_cfgs:
+    # Tolerance of constraint violation
+    cost_limit: 0.1
+

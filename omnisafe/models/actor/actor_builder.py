@@ -23,6 +23,8 @@ from omnisafe.models.actor.mlp_actor import MLPActor
 from omnisafe.models.actor.perturbation_actor import PerturbationActor
 from omnisafe.models.actor.vae_actor import VAE
 from omnisafe.models.actor.latent_categorical_actor import LatentCategoricalActor
+from omnisafe.models.actor.latent_multi_categorical_actor import LatentMultiCategoricalActor
+from omnisafe.models.actor.multi_categorical_actor import MultiCategoricalActor
 from omnisafe.models.base import Actor
 from omnisafe.typing import Activation, ActorType, InitFunction, OmnisafeSpace
 
@@ -133,6 +135,14 @@ class ActorBuilder:
                 activation=self._activation,
                 weight_initialization_mode=self._weight_initialization_mode,
             )
+        if actor_type == 'multi_discrete':
+            return MultiCategoricalActor(
+                self._obs_space,
+                self._act_space,
+                self._hidden_sizes,
+                activation=self._activation,
+                weight_initialization_mode=self._weight_initialization_mode,
+            )
         if actor_type == 'latent_discrete':
             return LatentCategoricalActor(
                 self._obs_space,
@@ -142,7 +152,17 @@ class ActorBuilder:
                 activation=self._activation,
                 weight_initialization_mode=self._weight_initialization_mode,
             )
+        if actor_type == 'latent_multi_discrete':
+            return LatentMultiCategoricalActor(
+                self._obs_space,
+                self._act_space,
+                self._hidden_sizes,
+                self._latent_size,
+                activation=self._activation,
+                weight_initialization_mode=self._weight_initialization_mode,
+            )
         raise NotImplementedError(
             f'Actor type {actor_type} is not implemented! '
-            f'Available actor types are: gaussian_learning, gaussian_sac, mlp, vae, perturbation, discrete.',
+            f'Available actor types are: gaussian_learning, gaussian_sac, mlp, vae, perturbation, discrete, '
+            f'multi_discrete, latent_discrete, latent_multi_discrete.',
         )

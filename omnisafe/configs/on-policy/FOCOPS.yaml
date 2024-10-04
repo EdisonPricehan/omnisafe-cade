@@ -34,7 +34,8 @@ defaults:
   # algorithm configurations
   algo_cfgs:
     # number of steps to update the policy
-    steps_per_epoch: 500
+#    steps_per_epoch: 500
+    steps_per_epoch: 250
     # number of iterations to update the policy
     update_iters: 10
     # batch size for each iteration
@@ -74,10 +75,10 @@ defaults:
     # clip ratio
     clip: 0.2
     # advantage estimation method, options: gae, retrace
-#    adv_estimation_method: gae
+    adv_estimation_method: gae
 #    adv_estimation_method: plain
 #    adv_estimation_method: gae-rtg
-    adv_estimation_method: vtrace
+#    adv_estimation_method: vtrace
     # standardize reward advantage
     standardized_rew_adv: False
     # standardize cost advantage
@@ -91,7 +92,7 @@ defaults:
     # use wandb for logging
     use_wandb: True
     # wandb project name
-    wandb_project: cacd
+    wandb_project: cacd-cliffcircular
     # use tensorboard for logging
     use_tensorboard: False
     # save model frequency
@@ -142,7 +143,47 @@ defaults:
     lagrangian_multiplier_init: 0.001
     # Learning rate of lagrangian multiplier
     lambda_lr: 0.001
+#    lambda_lr: 0.0035
     # Type of lagrangian optimizer
     lambda_optimizer: "Adam"
     # The upper bound of lagrange multiplier
     lagrangian_upper_bound: 2.0
+
+Medium:
+  train_cfgs:
+    # total number of steps to train
+    total_steps: 200000
+    # maximum number of steps per episode
+#    max_episode_steps: 512
+  algo_cfgs:
+    # number of steps to update the policy
+    steps_per_epoch: 1024
+    # number of iterations to update the policy
+    update_iters: 40
+    # batch size for each iteration
+    batch_size: 64
+    # target kl divergence
+    target_kl: 0.02
+    # The threshold for KL divergence in each policy update
+    focops_eta: 0.02
+    # advantage estimation method, options: gae, retrace
+    adv_estimation_method: gae
+#    adv_estimation_method: gae-rtg
+#    adv_estimation_method: vtrace
+#    adv_estimation_method: subm
+    # use semantic dynamics model
+    use_sdm: False
+  logger_cfgs:
+    # use wandb for logging
+    use_wandb: False
+    # wandb project name
+    wandb_project: cacd-riverine
+    # save model frequency
+    save_model_freq: 50
+  model_cfgs:
+    actor_type: multi_discrete
+  lagrange_cfgs:
+    # Tolerance of constraint violation
+    cost_limit: 0.2
+    # Learning rate of lagrangian multiplier
+    lambda_lr: 0.035

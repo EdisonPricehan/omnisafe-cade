@@ -3,7 +3,7 @@ from torch import nn, optim
 from torch.optim.lr_scheduler import ConstantLR, LinearLR
 from torch.distributions import Distribution
 
-from omnisafe.typing import Activation, InitFunction, OmnisafeSpace
+from omnisafe.typing import Activation, InitFunction, OmnisafeSpace, ActorType
 from omnisafe.utils.config import ModelConfig
 from omnisafe.utils.model import get_obs_dim, get_act_dim
 from omnisafe.models.actor.actor_builder import ActorBuilder
@@ -193,13 +193,13 @@ class ConstraintActorCriticDynamics(nn.Module):
     def forward_actor(
         self,
         obs: Union[torch.Tensor, List[torch.Tensor]],
-    ) -> Distribution:
+    ) -> Union[Distribution, List[Distribution]]:
         # Pass obs to shared GRU layers, but no grad for separate pass
         with torch.no_grad():
             gru_output = self.forward_gru(obs)
 
         # Pass the concatenated GRU outputs to the actor MLP
-        distribution: Distribution = self.actor(gru_output)
+        distribution: Union[Distribution, List[Distribution]] = self.actor(gru_output)
 
         return distribution
 
@@ -228,12 +228,12 @@ class ConstraintActorCriticDynamics(nn.Module):
     def forward_actor_reward(
         self,
         obs: Union[torch.Tensor, List[torch.Tensor]],
-    ) -> Tuple[Distribution, List[torch.Tensor]]:
+    ) -> Tuple[Union[Distribution, List[Distribution]], List[torch.Tensor]]:
         # Pass obs to shared GRU layers, grad is required for combined pass
         gru_output = self.forward_gru(obs)
 
         # Pass the concatenated GRU outputs to the actor MLP
-        distribution: Distribution = self.actor(gru_output)
+        distribution: Union[Distribution, List[Distribution]] = self.actor(gru_output)
 
         # Pass the concatenated GRU outputs to the reward estimator MLP
         reward_pred = self.reward_critic(gru_output)

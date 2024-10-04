@@ -3,24 +3,24 @@
 from __future__ import annotations
 
 import numpy as np
-
-from gymnasium.spaces import Discrete
+from gymnasium.spaces import MultiDiscrete
+from typing import List
 
 import torch
 import torch.nn as nn
 from torch.distributions import Categorical, Distribution
 
 from omnisafe.models.base import Actor
-from omnisafe.typing import Activation, InitFunction, OmnisafeSpace, ActorType
+from omnisafe.typing import Activation, InitFunction, OmnisafeSpace
 from omnisafe.utils.model import build_mlp_network
 
 
 # pylint: disable-next=too-many-instance-attributes
-class LatentCategoricalActor(Actor):
+class LatentMultiCategoricalActor(Actor):
     """Implementation of LatentCategoricalActor.
 
-    LatentCategoricalActor is an actor suitable for discrete action. It is used in
-    discrete action space environment such as ``CartPole-v1`` and so on.
+    LatentMultiCategoricalActor is an actor suitable for multi-discrete action. It is used in
+    multi-discrete action space environment such as ``Riverine Environment`` and so on.
 
     Args:
         obs_space (OmnisafeSpace): Observation space.
@@ -32,7 +32,7 @@ class LatentCategoricalActor(Actor):
             ``'kaiming_uniform'``.
     """
 
-    _current_dist: Categorical
+    _current_dist_list: List[Categorical]
 
     def __init__(
         self,
@@ -43,12 +43,16 @@ class LatentCategoricalActor(Actor):
         activation: Activation = 'relu',
         weight_initialization_mode: InitFunction = 'kaiming_uniform',
     ) -> None:
-        assert isinstance(act_space, Discrete), f'Categorical actor only supports categorical action!'
+        assert isinstance(act_space, MultiDiscrete), f'Only supports multi-categorical action space!'
 
-        """Initialize an instance of :class:`CategoricalActor`."""
+        """Initialize an instance of :class:`MultiCategoricalActor`."""
         super().__init__(obs_space, act_space, hidden_sizes, activation, weight_initialization_mode)
 
         self._latent_size: int = latent_size
+
+        self._act_dim_list: List[int] = act_space.nvec
+        self._act_dim_exec: int = len(act_space.nvec)
+        print(f'{self._act_dim_list=}')
 
         self.logits: nn.Module = build_mlp_network(
             sizes=[self._latent_size, *self._hidden_sizes, self._act_dim],
@@ -56,7 +60,7 @@ class LatentCategoricalActor(Actor):
             weight_initialization_mode=weight_initialization_mode,
         )
 
-    def _distribution(self, latent: torch.Tensor) -> Categorical:
+    def _distribution(self, latent: torch.Tensor) -> List[Categorical]:
         """Get the distribution of the actor.
 
         .. warning::
@@ -67,10 +71,10 @@ class LatentCategoricalActor(Actor):
             latent (torch.Tensor): Latent from upstream recurrent network.
 
         Returns:
-            Categorical distribution over actions based on the actor's logits.
+            List of categorical distribution over actions based on the actor's logits.
         """
         logits = self.logits(latent)
-        return Categorical(logits=logits)
+        return [Categorical(logits=split) for split in torch.split(logits, list(self._act_dim_list), dim=-1)]
 
     def predict(self, latent: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
         """Predict the action based on given observations.
@@ -88,13 +92,13 @@ class LatentCategoricalActor(Actor):
             The action with highest probability if deterministic is True,
             otherwise a sampled action from the distribution.
         """
-        self._current_dist = self._distribution(latent=latent)
+        self._current_dist_list = self._distribution(latent=latent)
         self._after_inference = True
         if deterministic:
-            action = torch.argmax(self._current_dist.logits, dim=-1, keepdim=True)
+            action = torch.stack([torch.argmax(dist.logits, dim=-1, keepdim=True) for dist in self._current_dist_list], dim=-1)
         else:
-            action = self._current_dist.sample()
-        return action.view(-1, int(np.array(self._act_space.shape).prod()))
+            action = torch.stack([dist.sample() for dist in self._current_dist_list], dim=-1)
+        return action.view(-1, self._act_dim_exec)
 
     def forward(self, latent: torch.Tensor) -> Distribution:
         """Forward method.
@@ -105,9 +109,9 @@ class LatentCategoricalActor(Actor):
         Returns:
             The current distribution.
         """
-        self._current_dist = self._distribution(latent)
+        self._current_dist_list = self._distribution(latent)
         self._after_inference = True
-        return self._current_dist
+        return self._current_dist_list
 
     def log_prob(self, act: torch.Tensor) -> torch.Tensor:
         """Compute the log probability of the action given the current distribution.
@@ -123,4 +127,8 @@ class LatentCategoricalActor(Actor):
         """
         assert self._after_inference, 'log_prob() should be called after predict() or forward()'
         self._after_inference = False
-        return self._current_dist.log_prob(act.squeeze())
+        return torch.stack(
+            [dist.log_prob(action) for dist, action in zip(self._current_dist_list, torch.unbind(act, dim=-1))], dim=-1
+        ).sum(dim=-1)
+
+

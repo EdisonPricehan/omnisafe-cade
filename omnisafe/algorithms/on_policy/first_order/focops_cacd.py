@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from torch.nn.utils.clip_grad import clip_grad_norm_
 
 from rich.progress import track
-from typing import Any
+from typing import Any, Union, List
 
 from omnisafe.adapter.onpolicy_cacd_adapter import OnPolicyCACDAdapter
 from omnisafe.algorithms import registry
@@ -34,8 +34,11 @@ from omnisafe.common.lagrange import Lagrange
 from omnisafe.utils import distributed
 from omnisafe.typing import AdvatageEstimator
 from omnisafe.utils.episode_dataset import EpisodeDataset
+from omnisafe.models.actor_critic.constraint_actor_critic import ConstraintActorCritic
 from omnisafe.models.actor_critic.constraint_actor_critic_dynamics import ConstraintActorCriticDynamics
-from omnisafe.utils.math import get_dist_mean_std
+from omnisafe.models.actor.latent_multi_categorical_actor import LatentMultiCategoricalActor
+from omnisafe.utils.math import (get_dist_mean_std, get_multi_dist_mean_std, kld_multi_categorical,
+                                 logits_from_multi_categorical)
 
 
 @registry.register
@@ -49,7 +52,7 @@ class FOCOPS_CACD(PolicyGradient):
         - URL: `FOCOPS <https://arxiv.org/abs/2002.06506>`_
     """
 
-    _p_dist: Categorical
+    _p_dist: Union[Categorical, List[Categorical]]
 
     def _init_env(self) -> None:
         self._env: OnPolicyCACDAdapter = OnPolicyCACDAdapter(
@@ -120,6 +123,8 @@ class FOCOPS_CACD(PolicyGradient):
 
         # Setup additional keys that need to be logged
         self._logger.register_key('Metrics/LagrangeMultiplier')
+        self._logger.register_key('Metrics/EpRetMean')
+        self._logger.register_key('Metrics/EpRetMax')
         self._logger.register_key('Train/PolicyStd')
         self._logger.register_key('Loss/Loss_reward_estimator', delta=True)
         self._logger.register_key('Loss/Loss_sdm', delta=True)
@@ -135,7 +140,7 @@ class FOCOPS_CACD(PolicyGradient):
 
     def _loss_pi(
         self,
-        distribution: Distribution,
+        distribution: Union[Distribution, List[Distribution]],
         act: torch.Tensor,
         logp: torch.Tensor,
         adv: torch.Tensor,
@@ -171,17 +176,33 @@ class FOCOPS_CACD(PolicyGradient):
         """
         logp_ = self._actor_critic.actor.log_prob(act)
         # std = self._actor_critic.actor.std
-        _, std = get_dist_mean_std(distribution)
+        if isinstance(distribution, list):  # Multi-discrete
+            _, stds = get_multi_dist_mean_std(distribution)
+            std = torch.mean(torch.stack(stds), dim=0).item()
+        else:
+            _, std = get_dist_mean_std(distribution)
         ratio = torch.exp(logp_ - logp)
 
-        kl = torch.distributions.kl_divergence(distribution, self._p_dist).sum(-1, keepdim=True)
+        if isinstance(distribution, list):  # Multi-discrete
+            kl = kld_multi_categorical(distribution, self._p_dist)
+        else:
+            kl = torch.distributions.kl_divergence(distribution, self._p_dist).sum(-1, keepdim=True)
+
         loss = (kl - (1 / self._cfgs.algo_cfgs.focops_lam) * ratio * adv) * (
             kl.detach() <= self._cfgs.algo_cfgs.focops_eta
         ).type(torch.float32)
         loss = loss.mean()
-        loss -= self._cfgs.algo_cfgs.entropy_coef * distribution.entropy().mean()
 
-        entropy = distribution.entropy().mean().item()
+        if isinstance(distribution, list):
+            loss -= self._cfgs.algo_cfgs.entropy_coef * torch.sum(torch.stack([dist.entropy().mean() for dist in distribution]))
+        else:
+            loss -= self._cfgs.algo_cfgs.entropy_coef * distribution.entropy().mean()
+
+        if isinstance(distribution, list):
+            entropy = torch.sum(torch.stack([dist.entropy().mean() for dist in distribution])).item()
+        else:
+            entropy = distribution.entropy().mean().item()
+
         self._logger.store(
             {
                 'Train/Entropy': entropy,
@@ -275,8 +296,12 @@ class FOCOPS_CACD(PolicyGradient):
         # Get the current actor's action distribution for KL divergence calculation
         gru_obs = episode_dataset.padded_episodes[0]  # Episode (Batch) x Sequence x Feature
         with torch.no_grad():
-            old_distribution: Categorical = self._actor_critic.forward_actor(gru_obs)
-        old_logits = old_distribution.logits
+            old_distribution: Union[Categorical, List[Categorical]] = self._actor_critic.forward_actor(gru_obs)
+
+        if isinstance(old_distribution, list):
+            old_logits = logits_from_multi_categorical(old_distribution)
+        else:
+            old_logits = old_distribution.logits
         # print(f'{old_logits.shape=}')
 
         # Construct an episode dataloader for training
@@ -329,7 +354,10 @@ class FOCOPS_CACD(PolicyGradient):
                         target_value_r = self._view2d(target_value_r, squeeze=True)
                         self._update_reward_critic(obs, target_value_r)
                 else:  # Update actor and (immediate) reward estimator
-                    self._p_dist = Categorical(logits=old_logits)
+                    if isinstance(self._actor_critic.actor, LatentMultiCategoricalActor):
+                        self._p_dist = [Categorical(logits=split) for split in torch.split(old_logits, list(self._actor_critic.actor._act_dim_list), dim=-1)]
+                    else:
+                        self._p_dist = Categorical(logits=old_logits)
 
                     act, logp, adv_r, adv_c, reward, target_value_r = (
                         self._view2d(act),
@@ -357,11 +385,14 @@ class FOCOPS_CACD(PolicyGradient):
 
             new_distribution = self._actor_critic.forward_actor(gru_obs)
 
-            kl = (
-                torch.distributions.kl.kl_divergence(old_distribution, new_distribution)
-                .sum(-1, keepdim=True)
-                .mean()
-            )
+            if isinstance(new_distribution, list):
+                kl = kld_multi_categorical(old_distribution, new_distribution)
+            else:
+                kl = (
+                    torch.distributions.kl.kl_divergence(old_distribution, new_distribution)
+                    .sum(-1, keepdim=True)
+                    .mean()
+                )
             kl = distributed.dist_avg(kl)
 
             self._logger.store({'Train/KL': kl.item()})

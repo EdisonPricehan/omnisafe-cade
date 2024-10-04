@@ -22,7 +22,7 @@ import torch
 from rich.progress import track
 
 from omnisafe.adapter.online_adapter import OnlineAdapter
-from omnisafe.common.buffer import VectorOnPolicyBuffer
+from omnisafe.common.buffer import VectorOnPolicyBuffer, VectorOnPolicyCACDBuffer
 from omnisafe.common.logger import Logger
 from omnisafe.models.actor_critic.constraint_actor_critic_dynamics import ConstraintActorCriticDynamics
 from omnisafe.utils.config import Config
@@ -62,7 +62,7 @@ class OnPolicyCACDAdapter(OnlineAdapter):
         self,
         steps_per_epoch: int,
         agent: ConstraintActorCriticDynamics,
-        buffer: VectorOnPolicyBuffer,
+        buffer: VectorOnPolicyCACDBuffer,
         logger: Logger,
     ) -> None:
         """Rollout the environment and store the data in the buffer.
@@ -144,6 +144,10 @@ class OnPolicyCACDAdapter(OnlineAdapter):
                         self._ep_len[idx] = 0.0
 
                     buffer.finish_path(last_r, last_value_c, idx)
+
+                    # Log mean and max episodic rewards from buffer
+                    logger.store({'Metrics/EpRetMean': buffer.buffers[0].mean_ep_ret})
+                    logger.store({'Metrics/EpRetMax': buffer.buffers[0].max_ep_ret})
 
                     # Reset latent for next episode
                     # latent = self._init_latent()

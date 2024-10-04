@@ -20,9 +20,10 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 import torch
-from gymnasium.spaces import Box, Discrete, MultiBinary
+from gymnasium.spaces import Box, Discrete, MultiBinary, MultiDiscrete
 
 from omnisafe.typing import DEVICE_CPU, OmnisafeSpace
+from omnisafe.utils.model import get_obs_dim, get_act_dim
 
 
 class BaseBuffer(ABC):
@@ -74,16 +75,16 @@ class BaseBuffer(ABC):
 
         if isinstance(obs_space, (Box, Discrete, MultiBinary)):
             obs_buf = torch.zeros(
-                (size, int(np.array(obs_space.shape).prod())),
+                (size, get_obs_dim(obs_space)),
                 dtype=torch.float32,
                 device=device,
             )
         else:
             raise NotImplementedError
 
-        if isinstance(act_space, (Box, Discrete)):
+        if isinstance(act_space, (Box, Discrete, MultiDiscrete)):
             act_buf = torch.zeros(
-                (size, int(np.array(act_space.shape).prod())),
+                (size, get_act_dim(act_space, execution_dim=True)),
                 dtype=torch.float32,
                 device=device,
             )

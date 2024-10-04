@@ -29,17 +29,17 @@ from typing import (
 )
 
 import torch
-from gymnasium.spaces import Box, Discrete, MultiBinary
+from gymnasium.spaces import Box, Discrete, MultiBinary, MultiDiscrete
 from torch.types import Device
 
 
 RenderFrame = TypeVar('RenderFrame')
-OmnisafeSpace = Union[Box, Discrete, MultiBinary]
+OmnisafeSpace = Union[Box, Discrete, MultiDiscrete, MultiBinary]
 Activation = Literal['identity', 'relu', 'sigmoid', 'softplus', 'tanh']
 AdvatageEstimator = Literal['gae', 'gae-rtg', 'vtrace', 'plain', 'subm']
 InitFunction = Literal['kaiming_uniform', 'xavier_normal', 'glorot', 'xavier_uniform', 'orthogonal']
 CriticType = Literal['v', 'q', 'r']
-ActorType = Literal['gaussian_learning', 'gaussian_sac', 'mlp', 'vae', 'perturbation', 'discrete', 'latent_discrete']
+ActorType = Literal['gaussian_learning', 'gaussian_sac', 'mlp', 'vae', 'perturbation', 'discrete', 'latent_discrete', 'latent_multi_discrete']
 DEVICE_CPU = torch.device('cpu')
 
 
