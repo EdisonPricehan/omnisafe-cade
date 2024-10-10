@@ -12,7 +12,7 @@ from omnisafe.models.dynamics.ldm import LatentDynamicsModel
 from omnisafe.models.dynamics.ldm_mlp import LatentDynamicsModelMLP
 from omnisafe.utils.riverine_dataset import RiverDataset, get_train_test_datasets
 from omnisafe.utils.config import ModelConfig
-from omnisafe.utils.math import l1_loss, iou_loss
+from omnisafe.utils.math import l1_loss, soft_iou_loss, iou
 from omnisafe.utils.patchification import get_patchified_mask, inflate_patch_mask
 
 
@@ -44,6 +44,7 @@ def train_ldm(
     batch_size: int = 8,  # Used as sequence_length for LDM and batch_size for LDM-MLP
     epochs: int = 100,
     device: Union['str', torch.device] = 'cpu',
+    model_save_path: str = '',
 ):
     """
     Train Latent Dynamics Model
@@ -92,7 +93,7 @@ def train_ldm(
                 pred_latent, h_prev = ldm.forward(latent_cur, act_batch, h_prev)  # Outputs all steps
                 pred_latent = pred_latent.squeeze(1)  # Remove the singleton batch dimension
 
-                # Compute the loss over all steps
+                # Compute the MSE loss over all steps
                 loss = ldm.loss_mse(pred_latent, latent_next)
 
                 # Backpropagation
@@ -140,19 +141,25 @@ def train_ldm(
                     running_loss = 0.0
 
     # Save the final model
-    if isinstance(ldm, LatentDynamicsModel):
-        torch.save(ldm.state_dict(), 'ldm.pth')
-    elif isinstance(ldm, LatentDynamicsModelMLP):
-        torch.save(ldm.state_dict(), 'ldm_mlp.pth')
-    else:
-        raise NotImplementedError
+    if model_save_path != '':
+        if isinstance(ldm, LatentDynamicsModel):
+            torch.save(ldm.state_dict(), model_save_path)
+            print(f'Model saved as {model_save_path}.')
+        elif isinstance(ldm, LatentDynamicsModelMLP):
+            torch.save(ldm.state_dict(), model_save_path)
+            print(f'Model saved as {model_save_path}.')
+        else:
+            raise NotImplementedError
 
 
-def test_ldm(
+def ldm_testing(
     test_dataset: RiverDataset,
     ldm: Union[LatentDynamicsModel, LatentDynamicsModelMLP],
     vae: VAE,
     ldm_path: str,
+    patch_size_x: int = 8,
+    patch_size_y: int = 8,
+    patch_step: int = 8,
     device: Union[str, torch.device] = 'cpu',
     horizon: int = 5,
     step: int = 1,
@@ -167,6 +174,9 @@ def test_ldm(
         ldm:
         vae:
         ldm_path:
+        patch_size_x:
+        patch_size_y:
+        patch_step:
         device:
         horizon:
         step:
@@ -192,7 +202,7 @@ def test_ldm(
     num_samples = 0
 
     # Prepare the CSV file
-    with open(output_csv, mode='w', newline='') as csv_file:
+    with (open(output_csv, mode='w', newline='') as csv_file):
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow(['start_index', 'step', 'metric_value'])
 
@@ -232,14 +242,15 @@ def test_ldm(
                     pred_mask = reconstructed[-1].unsqueeze(0)  # Mask is in the 4th channel. (1, H, W)
 
                     # Patchify the reconstructed predicted next mask and ground truth next mask
-                    pred_mask_patch, true_mask_patch = get_patchified_mask(pred_mask), get_patchified_mask(next_mask)
+                    pred_mask_patch = get_patchified_mask(pred_mask, patch_size_x=patch_size_x, patch_size_y=patch_size_y, patch_step=patch_step)
+                    true_mask_patch = get_patchified_mask(next_mask, patch_size_x=patch_size_x, patch_size_y=patch_size_y, patch_step=patch_step)
 
                     if debug:
                         visualize_masks(true_mask_patch, pred_mask_patch)
 
                     # Evaluate based on the chosen metric
-                    if metric == 'iou':
-                        loss = iou_loss(pred_mask_patch, true_mask_patch).mean().item()
+                    if metric == 'iou':  # Use the binarized mask to calculate iou metric (not a loss)
+                        loss = iou(pred_mask_patch, true_mask_patch).mean().item()
                     elif metric == 'l1':
                         loss = l1_loss(pred_mask_patch, true_mask_patch).item()
                     else:
@@ -264,7 +275,7 @@ def test_ldm(
 
     # Calculate the average metric over the entire test dataset
     average_metric = total_loss / num_samples
-    print(f"Average {metric.upper()} over the test dataset: {average_metric:.4f}")
+    print(f"Average {metric.upper()} loss over the test dataset: {average_metric:.4f}")
     return average_metric
 
 
@@ -296,20 +307,30 @@ def visualize_masks(true_mask, pred_mask):
 
 
 if __name__ == '__main__':
+    # Constants
+    env: str = 'riverine'
+    image_size = 128  # same for width and height
+    patch_rows, patch_cols = 16, 16  # dimension of coarsened mask
+    patch_size_x, patch_size_y = image_size // patch_rows, image_size // patch_cols
+    patch_step = patch_size_x  # no overlap among patches
+
+    # Common variables
     train = False  # Set to True for training, False for testing
-    use_mlp_model = True  # Set to True to use the MLP version of the LDM
+    use_mlp_model = False  # Set to True to use the MLP version of the LDM
+    model_path = f'{env}_ldm_mlp.pth' if use_mlp_model else f'{env}_ldm.pth'  # LDM model path for saving and loading
     device = 'cpu'  # Change to 'cuda' if using a GPU
+
     # For VAE
     channel_size = 4  # 4-channel rgb+mask
-    image_size = 128  # same for width and height
     latent_dim = 64
     hidden_dims = [16, 32, 64, 128]
     vae_model_name = 'vae-4channel.pth'
-    lr = 0.0003
+
     # For recurrent LDM
     action_dim = 4
     gru_hidden_dim = 128
     gru_layers = 1
+    lr = 0.001
 
     # Load the fixed VAE model
     vae = VAE(
@@ -328,7 +349,7 @@ if __name__ == '__main__':
 
     model_config = ModelConfig(
         dynamics={
-            'hidden_sizes': [64, 64],
+            'hidden_sizes': [128, 64],
             'activation': 'relu',
             'lr': lr,
         }
@@ -345,15 +366,37 @@ if __name__ == '__main__':
 
     if train:
         batch_size = 64
-        train_epochs = 20
-        train_ldm(train_dataset, ldm, vae, batch_size, train_epochs, device)
+        train_epochs = 30
+
+        train_ldm(
+            train_dataset=train_dataset,
+            ldm=ldm,
+            vae=vae,
+            batch_size=batch_size,
+            epochs=train_epochs,
+            device=device,
+        )
         print(f'Training completed.')
+
     else:
         debug = False  # Set to True if want to visualize LDM's mask prediction
-        model_path = 'ldm_mlp.pth' if use_mlp_model else 'ldm.pth'
         horizon = 10
-        metric = 'iou'  # Choose between {'iou', 'l1'}
+        metric = 'l1'  # Choose between {'iou', 'l1'}
         ldm_test_file = f'{model_path.split(".")[0]}_test_{metric}_h{horizon}.csv'
 
-        test_ldm(test_dataset, ldm, vae, model_path, device, horizon, metric=metric, output_csv=ldm_test_file, debug=debug)
+        ldm_testing(
+            test_dataset=test_dataset,
+            ldm=ldm,
+            vae=vae,
+            ldm_path=model_path,
+            patch_size_x=patch_size_x,
+            patch_size_y=patch_size_y,
+            patch_step=patch_step,
+            device=device,
+            horizon=horizon,
+            step=1,
+            metric=metric,
+            output_csv=ldm_test_file,
+            debug=debug,
+        )
         print(f'Testing completed.')

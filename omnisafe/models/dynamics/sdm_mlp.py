@@ -72,23 +72,6 @@ class SemanticDynamicsModelMLP(nn.Module):
             else:
                 return pred_obs_next
 
-    def loss_l1(
-        self,
-        obs_next_pred: torch.Tensor,
-        obs_next: torch.Tensor) -> torch.Tensor:
-        """
-        Calculate the L1 loss between the true and the estimated next observation.
-        Args:
-            obs_next_pred:
-            obs_next:
-
-        Returns:
-
-        """
-        loss = F.l1_loss(obs_next_pred, obs_next)
-        # print(f'L1 {loss=}')
-        return loss
-
     def backprop(self, loss: torch.Tensor) -> None:
         """
         Update sdm parameters by loss

@@ -22,11 +22,11 @@ def patch_array(
     Args:
         mask_array (np.ndarray): Input 2D mask array with values in [0, 1] (float) or [0, 255] (uint8).
         is_uint8 (bool): Indicates if the input array is in uint8 format (values in [0, 255]).
-        patch_size_x (int): The width of each patch.
-        patch_size_y (int): The height of each patch.
+        patch_size_x (int): Pixel number in x axis of a patch.
+        patch_size_y (int): Pixel number in y axis of a patch.
         patch_step (int): The step size for extracting patches.
-        binary_threshold (float): The threshold to convert the mask into binary values.
-        patch_threshold (float): The threshold to determine if a patch is water.
+        binary_threshold (float): The value threshold to convert the mask into binary values.
+        patch_threshold (float): The percentage threshold to determine if a patch is water.
 
     Returns:
         np.ndarray: A flattened binary array representing the coarsened mask patches.
@@ -60,10 +60,25 @@ def get_patchified_mask(
     binary_threshold: float = 0.5,
     patch_threshold: float = 0.5,
 ) -> Union[np.ndarray, torch.Tensor]:
+    """
+    Patchify the mask
+    Args:
+        mask: given mask for patchification.
+        is_uint8: Indicates if the input array is in uint8 format (values in [0, 255]).
+        patch_size_x: Pixel number in x axis of a patch.
+        patch_size_y: Pixel number in y axis of a patch.
+        patch_step: The step size for extracting patches.
+        binary_threshold: The value threshold to convert the mask into binary values.
+        patch_threshold: The percentage threshold to determine if a patch is water.
+
+    Returns: A flattened binary array or tensor representing the coarsened mask patches.
+
+    """
     # Arg validation
     assert 0 <= binary_threshold < 1, f'Binary threshold should be in [0, 1), given {binary_threshold}'
     assert 0 <= patch_threshold < 1, f'Patch threshold should be in [0, 1), given {patch_threshold}'
-    assert patch_size_x == patch_size_y == patch_step, f'Only support square image patchification without overlapping.'
+    assert patch_size_x == patch_size_y == patch_step, (f'Only support square image patchification without overlapping, '
+                                                        f'{patch_size_x=} {patch_size_y=} {patch_step=}.')
 
     if isinstance(mask, np.ndarray):
         # Channel dim should be last
@@ -111,11 +126,11 @@ def inflate_patch_mask(
     """
     Inflate the coarsened water mask to the original size for parallel display
     Args:
-        image_size:
-        patch_dim_x:
-        patch_dim_y:
-        patch_size_x:
-        patch_size_y:
+        image_size: pixels number in image axis, assuming square image
+        patch_dim_x: x dim of patchified image
+        patch_dim_y: y dim of patchified image
+        patch_size_x: pixel number in x axis of a patch
+        patch_size_y: pixel number in y axis of a patch
         obs: coarsened water mask for RL training
 
     Returns:

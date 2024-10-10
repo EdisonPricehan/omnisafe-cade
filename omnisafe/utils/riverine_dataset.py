@@ -74,7 +74,7 @@ class RiverDataset(Dataset):
 def get_train_test_datasets() -> Tuple[RiverDataset, RiverDataset]:
     # Dataset paths
     cur_dir = os.path.dirname(os.path.abspath(__file__))
-    dataset_dir = os.path.join(cur_dir, '../datasets/demos')
+    dataset_dir = os.path.join(cur_dir, '../datasets/riverine')
 
     # Transform to convert images to tensors
     transform = transforms.Compose([
@@ -82,7 +82,7 @@ def get_train_test_datasets() -> Tuple[RiverDataset, RiverDataset]:
         transforms.ToTensor(),  # Converts to float tensor with range [0, 1], and channel first
     ])
 
-    # Example usage
+    # Define episodes for training and testing manually
     train_trajectories = ['demo0', 'demo1', 'demo2', 'demo3', 'demo4', 'demo5', 'demo6', 'demo7', 'demo8', 'demo10']
     test_trajectories = ['demo9']
 

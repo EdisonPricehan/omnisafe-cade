@@ -44,7 +44,11 @@ def l1_loss(mask1: torch.Tensor, mask2: torch.Tensor) -> torch.Tensor:
     return F.l1_loss(mask1, mask2)
 
 
-def iou_loss(mask1: torch.Tensor, mask2: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+def mse_loss(mask1: torch.Tensor, mask2: torch.Tensor) -> torch.Tensor:
+    return F.mse_loss(mask1, mask2)
+
+
+def iou(mask1: torch.Tensor, mask2: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
     # Check dimension
     if mask1.dim() >= 4:
         assert mask1.shape[1] == 1, f'Channel dim should be 1, {mask1.shape=}'
@@ -78,6 +82,33 @@ def iou_loss(mask1: torch.Tensor, mask2: torch.Tensor, threshold: float = 0.5) -
     iou = intersection / (union + 1e-6)
 
     return iou
+
+
+def soft_iou_loss(pred_mask: torch.Tensor, true_mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Compute the differentiable IoU (soft IoU or Jaccard loss) between predicted mask and true mask.
+
+    Args:
+        pred_mask (torch.Tensor): Predicted mask with values between 0 and 1 (probabilities).
+        true_mask (torch.Tensor): Ground truth binary mask (0 or 1).
+        eps (float): Small value to avoid division by zero.
+
+    Returns:
+        torch.Tensor: IoU loss (1 - IoU)
+    """
+    # Flatten the masks to treat each pixel as an individual element
+    pred_mask_flat = pred_mask.view(pred_mask.size(0), -1)
+    true_mask_flat = true_mask.view(true_mask.size(0), -1)
+
+    # Compute the intersection and union (using soft masks for the predicted mask)
+    intersection = torch.sum(pred_mask_flat * true_mask_flat, dim=1)
+    union = torch.sum(pred_mask_flat + true_mask_flat, dim=1) - intersection
+
+    # Compute the IoU
+    iou_value = intersection / (union + eps)
+
+    # IoU loss is 1 - IoU
+    return 1 - iou_value.mean()
 
 
 def get_dist_mean_std(dist: Distribution) -> Tuple[torch.Tensor, torch.Tensor]:
