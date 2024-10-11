@@ -279,7 +279,7 @@ def ldm_testing(
     return average_metric
 
 
-def visualize_masks(true_mask, pred_mask):
+def visualize_masks(true_mask: torch.Tensor, pred_mask: torch.Tensor):
     """
     Function to visualize the ground truth mask and the predicted mask.
     """

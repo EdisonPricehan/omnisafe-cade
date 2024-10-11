@@ -121,11 +121,12 @@ class LatentDynamicsModel(nn.Module):
         gru_input = torch.cat([z_t, a_t], dim=-1).unsqueeze(
             0)  # Add sequence length dimension (1, batch_size, latent_dim + act_dim)
 
-        # Forward pass through the GRU
-        gru_output, h_next = self.gru(gru_input, h_prev)  # gru_output: (1, batch_size, gru_hidden_dim)
+        with torch.no_grad():
+            # Forward pass through the GRU
+            gru_output, h_next = self.gru(gru_input, h_prev)  # gru_output: (1, batch_size, gru_hidden_dim)
 
-        # Predict the next latent state
-        z_pred = self.fc(gru_output.squeeze(0))  # Remove the sequence length dimension, shape (batch_size, latent_dim)
+            # Predict the next latent state
+            z_pred = self.fc(gru_output.squeeze(0))  # Remove the sequence length dimension, shape (batch_size, latent_dim)
 
         return z_pred, h_next
 
