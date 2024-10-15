@@ -1,6 +1,10 @@
 import matplotlib.pyplot as plt
-from typing import Union, Type, List, Tuple
+from mpl_toolkits.mplot3d import Axes3D
+from typing import Union, Type, List, Tuple, Dict, Optional
 import os
+import time
+import json
+import numpy as np
 from gymnasium.spaces import MultiBinary, MultiDiscrete
 import torch
 
@@ -17,10 +21,15 @@ from omnisafe.utils.patchification import get_patchified_mask, inflate_patch_mas
 from omnisafe.utils.config import ModelConfig
 
 
+ModelClassType = Union[Type[SDM], Type[SDM_MLP], Type[LDM], Type[LDM_MLP]]
+ModelInstanceType = Union[SDM, SDM_MLP, LDM, LDM_MLP]
+ModelFamily = Dict[str, ModelInstanceType]
+
+
 def load_model(
-    model_class: Union[Type[SDM], Type[SDM_MLP], Type[LDM], Type[LDM_MLP]],
+    model_class: ModelClassType,
     model_path: str,
-):
+) -> ModelInstanceType:
     assert os.path.exists(model_path), f'{model_path} does not exist!'
 
     # Construct model
@@ -62,6 +71,83 @@ def load_model(
     model.eval()  # Set to evaluation mode
 
     return model
+
+
+def calculate_inference_time(
+    model: ModelInstanceType,
+    test_data: RiverDataset,
+    horizon: int,
+) -> Tuple[float, int, float, float]:
+    """
+    Calculate the total inference time for the given model across the test dataset, excluding data loading time.
+
+    Args:
+        model (ModelInstanceType): The model to be tested.
+        test_data (RiverDataset): The test dataset.
+        horizon (int): The number of future steps to predict.
+
+    Returns:
+        Tuple: total time (float), number of inferences (int), mean inference time (float), and standard deviation (float).
+    """
+    inference_times = []
+
+    with torch.no_grad():
+        for idx in range(len(test_data) - horizon):
+            # Pre-load the data outside timing to exclude data loading time
+            rgbs, masks, actions = get_ground_truth(idx, horizon)
+
+            # Time only the inference process
+            start_time = time.time()
+            predict_masks(model, rgbs, masks, actions, horizon)
+            end_time = time.time()
+
+            # Record the inference time
+            inference_times.append(end_time - start_time)
+
+    total_time = sum(inference_times)
+    num_inferences = len(inference_times)
+    mean_inference_time = total_time / num_inferences
+    std_inference_time = torch.std(torch.tensor(inference_times)).item()
+
+    return total_time, num_inferences, mean_inference_time, std_inference_time
+
+
+def calculate_model_size(model: ModelInstanceType) -> int:
+    return sum(p.numel() for p in model.parameters())
+
+
+def run_inference_only(models: ModelFamily, test_data: RiverDataset, horizon: int):
+    """
+    Main function to run inferences without displaying figures.
+    Args:
+        models:
+        test_data:
+        horizon:
+
+    Returns:
+        A dict summary of inference statistics.
+
+    """
+    results = {}
+    for model_name, model in models.items():
+        print(f'Start inferring for {model_name} ...')
+
+        # Calculate inference time
+        total_time, infer_count, mean_infer_time, std_infer_time = calculate_inference_time(model, test_data, horizon)
+
+        # Calculate model size
+        model_size = calculate_model_size(model)
+
+        # Store results
+        results[model_name] = {
+            'total_inference_time': total_time,
+            'infer_count': infer_count,
+            'infer_time_mean': mean_infer_time,
+            'infer_time_std': std_infer_time,
+            'model_size': model_size,
+        }
+
+    return results
 
 
 def get_ground_truth(
@@ -169,7 +255,13 @@ def predict_masks(
     return predicted_patchified_masks
 
 
-def update_figure(event):
+def update_figure(auto_save: bool = False, save_dir: Optional[str] = None):
+    if auto_save:
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+        else:
+            print(f'If auto_save is enabled, the save_dir should not be empty.')
+
     global start_idx
 
     # Move the index forward
@@ -236,39 +328,111 @@ def update_figure(event):
         patch_size_y=patch_size_y,
     ) for m in ldm_mlp_pred]
 
-    # Clear previous plots
-    for ax in axes.flatten():
-        ax.clear()
+    # Clear all subplots
+    for axes_row in axes:
+        for ax in axes_row:
+            ax.clear()
 
     # Plot ground truth and predictions for each model
     for i in range(horizon + 1):
-        axes[0, i].imshow(rgbs[i].permute(1, 2, 0).numpy())  # Ground truth: rgb
-        axes[1, i].imshow(masks[i].squeeze().numpy(), cmap='gray')  # Ground truth: original mask
-        axes[2, i].imshow(masks_patchified_inflated[i], cmap='gray')  # Ground truth: patchified and inflated original mask
-        axes[3, i].imshow(sdm_pred_inflated[i], cmap='gray')  # SDM
-        axes[4, i].imshow(sdm_mlp_pred_inflated[i], cmap='gray')  # SDM-MLP
-        axes[5, i].imshow(ldm_pred_inflated[i], cmap='gray')  # LDM
-        axes[6, i].imshow(ldm_mlp_pred_inflated[i], cmap='gray')  # LDM-MLP
+        axes[0][i].imshow(rgbs[i].permute(1, 2, 0).numpy())  # Ground truth: rgb
+        axes[1][i].imshow(masks[i].squeeze().numpy(), cmap='gray')  # Ground truth: original mask
+        axes[2][i].imshow(masks_patchified_inflated[i],
+                          cmap='gray')  # Ground truth: patchified and inflated original mask
+        axes[3][i].imshow(sdm_pred_inflated[i], cmap='gray')  # SDM
+        axes[4][i].imshow(sdm_mlp_pred_inflated[i], cmap='gray')  # SDM-MLP
+        axes[5][i].imshow(ldm_pred_inflated[i], cmap='gray')  # LDM
+        axes[6][i].imshow(ldm_mlp_pred_inflated[i], cmap='gray')  # LDM-MLP
+
+        if i == horizon:
+            continue
+        plot_action_arrow(axes[7][i], actions[i])
 
     # Hide the ticks and spines but keep axis labels
-    for ax in axes.flatten():
-        ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)  # Hide ticks and tick labels
-        ax.spines['top'].set_visible(False)  # Hide top spine
-        ax.spines['right'].set_visible(False)  # Hide right spine
-        ax.spines['bottom'].set_visible(False)  # Hide bottom spine
-        ax.spines['left'].set_visible(False)  # Hide left spine
+    for axes_row in axes:
+        for ax in axes_row:
+            ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)  # Hide ticks and tick labels
+            ax.spines['top'].set_visible(False)  # Hide top spine
+            ax.spines['right'].set_visible(False)  # Hide right spine
+            ax.spines['bottom'].set_visible(False)  # Hide bottom spine
+            ax.spines['left'].set_visible(False)  # Hide left spine
 
     # Column titles for each step (including input)
-    column_titles = [f"Step {i}" for i in range(horizon + 1)]
-    for i, ax in enumerate(axes[0, :]):
+    column_titles = ['Current'] + [f"Step {i}" for i in range(1, horizon + 1)]
+    for i, ax in enumerate(axes[0]):
         ax.set_title(column_titles[i])
 
     # Row titles for each row
-    row_titles = ["GT RGB", "GT Mask", "GT Mask Patch", "SDM", "SDM-MLP", "LDM", "LDM-MLP"]
-    for i, ax in enumerate(axes[:, 0]):
-        ax.set_ylabel(row_titles[i], rotation=90, size='large', fontweight='bold')
+    row_titles = ["GT RGB", "GT Mask", "GT Mask Patch", "SDM", "SDM-MLP", "LDM", "LDM-MLP", 'Action']
+    for i, ax in enumerate([axes_row[0] for axes_row in axes]):
+        if i == 7:  # action row
+            ax.set_zlabel(row_titles[i])  # not taking any effect
+        else:
+            ax.set_ylabel(row_titles[i], rotation=90, size='large', fontweight='bold')
 
-    plt.draw()
+    plt.tight_layout()
+
+    if auto_save:
+        save_path = os.path.join(save_dir, f"step_{start_idx:03}.png")
+        plt.savefig(save_path)
+    else:
+        plt.draw()
+
+
+def plot_action_arrow(ax, action, scale=1.0):
+    """
+    Plots a 3D cross symbol with an arrow indicating the action direction.
+
+    Parameters:
+    ax (Axes3D): The 3D axes to plot the action arrow.
+    action (list): The action vector [vertical, rotation, forward-backward, left-right].
+                   Each element is 0, 1, or 2, where 1 means no movement.
+    scale (float): Scaling factor for the arrow size.
+    """
+    # Draw fixed 3D axes without arrows (for non-movement directions)
+    ax.quiver(0, 0, 0, 1.5, 0, 0, arrow_length_ratio=0, color='gray')  # X-axis (forward/backward)
+    ax.quiver(0, 0, 0, 0, 1.5, 0, arrow_length_ratio=0, color='gray')  # Y-axis (left/right)
+    ax.quiver(0, 0, 0, 0, 0, 1.5, arrow_length_ratio=0, color='gray')  # Z-axis (up/down)
+
+    # Define arrow scaling for each axis
+    arrow_scale = 1.5 * scale
+
+    # Plot the action along the triggered axis with an arrow
+    if action[0] == 0:  # Upward movement (Z-axis)
+        ax.quiver(0, 0, 0, 0, 0, arrow_scale, arrow_length_ratio=0.3, color='blue', alpha=.8, lw=2)
+    elif action[0] == 2:  # Downward movement (Z-axis)
+        ax.quiver(0, 0, 0, 0, 0, -arrow_scale, arrow_length_ratio=0.3, color='blue', alpha=.8, lw=2)
+
+    if action[2] == 0:  # Forward movement (X-axis)
+        ax.quiver(0, 0, 0, arrow_scale, 0, 0, arrow_length_ratio=0.3, color='green', alpha=.8, lw=2)
+    elif action[2] == 2:  # Backward movement (X-axis)
+        ax.quiver(0, 0, 0, -arrow_scale, 0, 0, arrow_length_ratio=0.3, color='green', alpha=.8, lw=2)
+
+    if action[3] == 0:  # Left movement (Y-axis)
+        ax.quiver(0, 0, 0, 0, arrow_scale, 0, arrow_length_ratio=0.3, color='orange', alpha=.8, lw=2)
+    elif action[3] == 2:  # Right movement (Y-axis)
+        ax.quiver(0, 0, 0, 0, -arrow_scale, 0, arrow_length_ratio=0.3, color='orange', alpha=.8, lw=2)
+
+    # For rotation, add an arc or circular representation (rotation along Z-axis)
+    if action[1] == 0:  # Rotate left
+        theta = np.linspace(0, np.pi / 2, 100)
+        x = 1 * np.cos(theta)
+        y = 1 * np.sin(theta)
+        ax.plot(x, y, zs=0, zdir='z', color='red', lw=2)  # Plot rotation arc
+        ax.quiver(x[-1], y[-1], 0, -0.7, 0, 0, arrow_length_ratio=0.6, color='red', alpha=.8, lw=2)
+    elif action[1] == 2:  # Rotate right
+        theta = np.linspace(np.pi / 2, 0, 100)
+        x = 1 * np.cos(theta)
+        y = 1 * np.sin(theta)
+        ax.plot(x, y, zs=0, zdir='z', color='red', lw=2)  # Plot rotation arc
+        ax.quiver(x[-1], y[-1], 0, 0, -0.7, 0, arrow_length_ratio=0.6, color='red', alpha=.8, lw=2)
+
+    # Adjust the view for better visualization
+    ax.set_box_aspect([1, 1, 1])  # Equal aspect ratio
+    ax.set_xlim([-1, 1])
+    ax.set_ylim([-1, 1])
+    ax.set_zlim([-1, 1])
+    ax.view_init(elev=30, azim=-150)  # Set a good 3D view angle
 
 
 def on_key(event):
@@ -281,7 +445,12 @@ def on_key(event):
 
     """
     if event.key == ' ':
-        update_figure(None)  # Call the update function when spacebar is pressed
+        update_figure()  # Call the update function when spacebar is pressed
+
+
+def run_headless_inference(save_dir: str):
+    for idx in range(0, len(test_dataset) - horizon, step):
+        update_figure(auto_save=True, save_dir=save_dir)
 
 
 if __name__ == '__main__':
@@ -324,6 +493,8 @@ if __name__ == '__main__':
     vae_model_name = 'vae-4channel.pth'
 
     # Configurable parameters
+    inference_only: bool = False  # Only do model inference to get statistics
+    headless: bool = True  # Run inference and save model prediction figures without showing them
     horizon = 10  # Number of steps to predict
     step = 1  # Step size when "space" button is pressed
     start_idx = 0
@@ -350,21 +521,58 @@ if __name__ == '__main__':
     ldm_model = load_model(LDM, ldm_path)
     ldm_mlp_model = load_model(LDM_MLP, ldm_mlp_path)
 
+    # Define the family of all models
+    all_models: ModelFamily = {
+        'sdm': sdm_model,
+        'sdm-mlp': sdm_mlp_model,
+        'ldm': ldm_model,
+        'ldm-mlp': ldm_mlp_model,
+    }
+
     # Initialize datasets
     train_dataset, test_dataset = get_train_test_datasets()
 
-    # Setup figure
-    fig, axes = plt.subplots(7, horizon + 1, figsize=(14, 9))
-    # fig.subplots_adjust(bottom=0.2)
-    # fig.subplots_adjust(wspace=0.2, hspace=0.2, left=0.2, right=0.9)
+    if inference_only:
+        print(f'Running inference only ...')
+        results = run_inference_only(all_models, test_dataset, horizon)
 
-    # Connect the key press event
-    fig.canvas.mpl_connect('key_press_event', on_key)
+        # Save results to json file
+        with open("model_comp.json", "w") as file:
+            json.dump(results, file, indent=4)
 
-    # Initial plot
-    update_figure(None)
+        print(f'Inferences are finished.')
 
-    plt.tight_layout()
-    plt.show()
+    else:
+        # Setup figure
+        axes = []
+        fig = plt.figure(figsize=(12, 9))
+        for row in range(7):
+            axes_row = []
+            for col in range(horizon + 1):
+                ax = fig.add_subplot(8, horizon + 1, (horizon + 1) * row + col + 1)
+                axes_row.append(ax)
+            axes.append(axes_row)
 
-    # TODO plot action
+        # Manually add 3D subplots for the action row
+        act_axes = []
+        for i in range(horizon):
+            action_ax = fig.add_subplot(8, horizon + 1, 7 * (horizon + 1) + i + 1, projection='3d')
+            act_axes.append(action_ax)
+        axes.append(act_axes)
+
+        if headless:
+            print(f'Running in headless mode while saving figures ...')
+            figure_save_path: str = 'models_pred'
+            run_headless_inference(figure_save_path)
+            print(f'Model inference finished, figures saved to {figure_save_path}.')
+
+        else:
+            print(f'Running in interactive mode, press "space" key to advance the inference.')
+
+            # Connect the key press event
+            fig.canvas.mpl_connect('key_press_event', on_key)
+
+            # Initial plot
+            update_figure()
+
+            plt.show()

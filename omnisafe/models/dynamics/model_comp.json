@@ -1,0 +1,30 @@
+{
+    "sdm": {
+        "total_inference_time": 2.1899538040161133,
+        "infer_count": 482,
+        "infer_time_mean": 0.004543472622440069,
+        "infer_time_std": 0.0008774913148954511,
+        "model_size": 42184
+    },
+    "sdm-mlp": {
+        "total_inference_time": 0.6759834289550781,
+        "infer_count": 482,
+        "infer_time_mean": 0.001402455246794768,
+        "infer_time_std": 0.0004705744795501232,
+        "model_size": 58304
+    },
+    "ldm": {
+        "total_inference_time": 8.11368441581726,
+        "infer_count": 482,
+        "infer_time_mean": 0.01683337015729722,
+        "infer_time_std": 0.0016416885191574693,
+        "model_size": 84288
+    },
+    "ldm-mlp": {
+        "total_inference_time": 7.507232427597046,
+        "infer_count": 482,
+        "infer_time_mean": 0.015575171011612128,
+        "infer_time_std": 0.003502024570479989,
+        "model_size": 21248
+    }
+}
