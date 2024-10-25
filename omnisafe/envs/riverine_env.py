@@ -1,4 +1,3 @@
-
 from mlagents_envs.base_env import CameraPose
 from mlagents_envs.envs.env_utils import make_unity_env
 from mlagents_envs.side_channel.agent_reset_channel import AgentResetChannel
@@ -9,6 +8,7 @@ from omnisafe.algorithms.algo_wrapper import AlgoWrapper as Agent
 from omnisafe.envs.core import CMDP, env_register
 from omnisafe.typing import OmnisafeSpace
 from omnisafe.typing import DEVICE_CPU
+from omnisafe.utils.patchification import inflate_patch_mask, get_patchified_mask
 
 from gymnasium.spaces import Box, MultiBinary
 
@@ -45,10 +45,6 @@ image_size = 128
 
 seed = 0
 
-# env_id = 'Medium'
-# env_id = 'Easy'
-# env_id = 'Hard'
-
 logger = logging_util.get_logger(__name__)
 logger.setLevel(logging_util.INFO)
 
@@ -78,13 +74,15 @@ class RiverineEnv(CMDP):
 
     _num_envs = 1
     _coordinate_observation_space: OmnisafeSpace
+
+    # VAE param
     _obs_len = 16  # VAE encoded vector
     _obs_pos_len = _obs_len + 4  # pose: (x, y, z, yaw)
 
     # Patchification params for riverine env
-    _patch_size_x: int = 16  # pixels num of a patch in x axis
-    _patch_size_y: int = 16  # pixels num of a patch in y axis
-    _patch_step: int = 16  # step size when traversing the whole image to get patches, best to be the same as above
+    patch_size_x: int = 8  # pixels num of a patch in x axis
+    patch_size_y: int = 8  # pixels num of a patch in y axis
+    patch_step: int = 8  # step size when traversing the whole image to get patches, best to be the same as above
 
     def __init__(
         self,
@@ -92,7 +90,7 @@ class RiverineEnv(CMDP):
         env_path: Optional[str] = None,
         use_vae: bool = False,
         water_perc_thr: float = 0.7,
-        device: torch.device = DEVICE_CPU,
+        device: Union[torch.device, str] = DEVICE_CPU,
         max_idle_steps: int = 50,
         **kwargs,
     ) -> None:
@@ -139,6 +137,7 @@ class RiverineEnv(CMDP):
             self._observation_space = Box(-high, high, dtype=np.float32)
         else:
             self.patch_dim_x, self.patch_dim_y = self.get_patch_dim()
+            print(f'Patch dim x: {self.patch_dim_x}, patch dim y: {self.patch_dim_y}')
             self._observation_space = MultiBinary(self.patch_dim_x * self.patch_dim_y)
 
         # Set action space
@@ -159,7 +158,7 @@ class RiverineEnv(CMDP):
         return self.env.cur_cost
 
     def step(self, action: torch.Tensor) \
-            -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         # obs is a list of RGB image and water mask arrays
         obs, rew, cost, term, trunc, info = self.env.step(action.tolist())
         self.rgb, self.mask, self.rgb_mask = self.env.render()
@@ -168,7 +167,16 @@ class RiverineEnv(CMDP):
             assert self._vae_model is not None
             obs = self.get_vae_embedding()
         else:  # Patchification
-            obs = self.get_patchified_mask(obs)
+            # obs = self.get_patchified_mask(obs)
+            obs = get_patchified_mask(
+                mask=obs[1],
+                is_uint8=True,
+                patch_size_x=self.patch_size_x,
+                patch_size_y=self.patch_size_y,
+                patch_step=self.patch_step,
+                binary_threshold=0.5,
+                patch_threshold=self.water_perc_thr,
+            )
 
         obs, rew, cost, term, trunc = (torch.as_tensor(x, dtype=torch.float32, device=self._device)
                                        for x in (obs, rew, cost, term, trunc))
@@ -184,8 +192,8 @@ class RiverineEnv(CMDP):
     def round_clamp_action(float_action: torch.Tensor):
         return torch.clamp(torch.round(float_action), min=0, max=2).to(torch.int)
 
-    def reset(self, seed: Union[int, None] = None, options: Union[dict[str, Any], None] = None)\
-            -> tuple[torch.Tensor, dict]:
+    def reset(self, seed: Union[int, None] = None, options: Union[dict[str, Any], None] = None) \
+        -> tuple[torch.Tensor, dict]:
         if seed is not None:
             self.set_seed(seed)
 
@@ -197,14 +205,22 @@ class RiverineEnv(CMDP):
             print(f'Current reset pose: {self.reset_pose}')
 
         obs = self.env.reset()
-        # print(f'{obs=}')
         self.rgb, self.mask, self.rgb_mask = self.env.render()
 
         if self.use_vae:
             assert self._vae_model is not None
             obs = self.get_vae_embedding()
         else:
-            obs = self.get_patchified_mask(obs)
+            # obs = self.get_patchified_mask(obs)
+            obs = get_patchified_mask(
+                mask=obs[1],
+                is_uint8=True,
+                patch_size_x=self.patch_size_x,
+                patch_size_y=self.patch_size_y,
+                patch_step=self.patch_step,
+                binary_threshold=0.5,
+                patch_threshold=self.water_perc_thr,
+            )
 
         # assert len(obs) == self._obs_pos_len, f'Reset obs length is {len(obs)}'
         # assert len(obs) == self._obs_len, f'Reset obs length is {len(obs)}'
@@ -231,39 +247,12 @@ class RiverineEnv(CMDP):
 
         """
         _, _, rgb_mask = self.env.render()
+
         obs = torch.Tensor(rgb_mask).permute((2, 0, 1)).unsqueeze(0)  # N=1 x C=4 x H x W
 
         obs = self._vae_model.encode(obs)[0][0].detach().numpy()  # 1d vector with hidden_dim length
 
         return obs
-
-    def get_patchified_mask(self, obs: List[np.ndarray]) -> np.ndarray:
-        # TODO use function from math module
-        """
-        Patchify water mask observation then condensed to a flattened vector
-        Args:
-            obs:
-
-        Returns:
-
-        """
-        assert len(obs) >= 2, f'obs len should be at least 2, given {len(obs)}.'
-
-        # Get the 1-channel 2D water mask
-        mask_arr = obs[1][..., 0]
-
-        # Patchify this mask to shape (patch_row_num, patch_col_num, patch_size_x, patch_size_y)
-        patchified_mask = patchify(mask_arr, (self._patch_size_x, self._patch_size_y), step=self._patch_step)
-
-        # Calculate the percentage of 255 (water) pixels in each (patch_size_x, patch_size_y) patch
-        percentage_255 = np.mean(patchified_mask == 255, axis=(2, 3))
-        # print(f'{percentage_255.shape=}')
-
-        # Create a 2D binary array where each element is 255 if the percentage exceeds 50%, otherwise 0
-        condensed_mask = np.where(percentage_255 > self.water_perc_thr, 255, 0).flatten()
-        # print(f'{condensed_mask=}')
-
-        return condensed_mask
 
     def get_patch_dim(self) -> Tuple[int, int]:
         """
@@ -271,40 +260,9 @@ class RiverineEnv(CMDP):
         Returns:
 
         """
-        patch_dim_x: int = ((image_size - self._patch_size_x) // self._patch_step) + 1
-        patch_dim_y: int = ((image_size - self._patch_size_y) // self._patch_step) + 1
+        patch_dim_x: int = ((image_size - self.patch_size_x) // self.patch_step) + 1
+        patch_dim_y: int = ((image_size - self.patch_size_y) // self.patch_step) + 1
         return patch_dim_x, patch_dim_y
-
-    def inflate_patch_mask(self, obs: np.ndarray) -> Optional[np.ndarray]:
-        # TODO use function from math module
-        """
-        Inflate the coarsened water mask to the original size for parallel display
-        Args:
-            obs: coarsened water mask for RL training
-
-        Returns:
-
-        """
-        if self.use_vae is True:
-            print(f'Mask inflation is on supported for patchification method, not VAE encoding.')
-            return None
-
-        if len(obs.shape) == 1:
-            obs_2d = obs.reshape((self.patch_dim_x, self.patch_dim_y))
-        elif len(obs.shape) == 2:
-            assert obs.shape[0] == self.patch_dim_x and obs.shape[1] == self.patch_dim_y, f'obs dim not match, {obs.shape}'
-            obs_2d = obs.copy()
-        else:
-            raise NotImplementedError
-
-        inflated_mask = np.zeros((self.patch_dim_x, self.patch_dim_y, self._patch_size_x, self._patch_size_y))
-        for row in range(self.patch_dim_x):
-            for col in range(self.patch_dim_y):
-                inflated_mask[row, col] = np.full((self._patch_size_x, self._patch_size_y), obs_2d[row, col])
-
-        inflated_mask_2d = unpatchify(inflated_mask, (image_size, image_size))
-
-        return inflated_mask_2d
 
     def set_seed(self, seed: int) -> None:
         logger.warning('Setting env seed is not supported!')
@@ -355,46 +313,62 @@ if __name__ == '__main__':
     from mlagents_envs.key2action import Key2Action
     import matplotlib.pyplot as plt
 
-    # Set the env name
-    # env_id = 'medium'
+    # Set the env difficulty level
+    env_id = 'medium'
     # env_id = 'easy'
-    env_id = 'hard'
+    # env_id = 'hard'
 
+    # Init the env
     env = RiverineEnv(
         env_id=env_id,
         use_vae=False,
+        water_perc_thr=0.5,
+        device='cpu',
         max_idle_steps=50000,
     )
 
-    obs, _ = env.reset()
-
+    # Init keyboard control
     k2a = Key2Action()
 
+    # Init the figure canvas
     fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+
     # Turn off the axes for each subplot
     for row in axes:
         for ax in row:
             ax.axis('off')
+
     # Interactive plot
     plt.ion()
+
     # Change the save key to Shift + S to avoid conflict
     plt.rcParams['keymap.save'] = ['shift+s']
 
+    # Make sure env is ready
+    obs, _ = env.reset()
     while not env.render_available():
         obs, _ = env.reset()
 
     rgb_canvas = axes[0, 0].imshow(env.rgb)
     mask_canvas = axes[1, 0].imshow(env.mask)
     mixed_canvas = axes[0, 1].imshow(env.rgb_mask)
-    patchified_mask_canvas = axes[1, 1].imshow(env.inflate_patch_mask(obs.numpy()), cmap='gray')
+    inflated_patch_mask = inflate_patch_mask(
+        obs=obs.numpy(),
+        image_size=image_size,
+        patch_dim_x=env.patch_dim_x,
+        patch_dim_y=env.patch_dim_y,
+        patch_size_x=env.patch_size_x,
+        patch_size_y=env.patch_size_y,
+    )
+    patchified_mask_canvas = axes[1, 1].imshow(inflated_patch_mask, cmap='gray')
 
     plt.tight_layout()
 
     try:
         i = 0
         while i < 10000:
-            # get next action either manually or randomly
-            action = k2a.get_multi_discrete_action()  # no action if no keyboard input
+            # get next action manually
+            action = k2a.get_multi_discrete_action()  # default action if no keyboard input
 
             obs, reward, cost, terminated, truncated, info = env.step(torch.Tensor(action))
 
@@ -403,7 +377,15 @@ if __name__ == '__main__':
             rgb_canvas.set_data(rgb)
             mask_canvas.set_data(mask)
             mixed_canvas.set_data(mixed)
-            patchified_mask_canvas.set_data(env.inflate_patch_mask(obs.numpy()))
+            patchified_mask_canvas.set_data(
+                inflate_patch_mask(
+                    obs=obs.numpy(),
+                    image_size=image_size,
+                    patch_dim_x=env.patch_dim_x,
+                    patch_dim_y=env.patch_dim_y,
+                    patch_size_x=env.patch_size_x,
+                    patch_size_y=env.patch_size_y,
+                ))
 
             plt.tight_layout()
             fig.canvas.draw()  # Force canvas to draw
@@ -420,12 +402,3 @@ if __name__ == '__main__':
     finally:
         env.close()
         plt.close()
-
-
-
-
-
-
-
-
-
