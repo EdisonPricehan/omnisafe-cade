@@ -161,6 +161,7 @@ def logits_from_multi_categorical(
 
     return logits
 
+
 def get_transpose(tensor: torch.Tensor) -> torch.Tensor:
     """Transpose the last two dimensions of a tensor.
 

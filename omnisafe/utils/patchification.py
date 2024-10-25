@@ -126,12 +126,12 @@ def inflate_patch_mask(
     """
     Inflate the coarsened water mask to the original size for parallel display
     Args:
+        obs: coarsened water mask for RL training
         image_size: pixels number in image axis, assuming square image
         patch_dim_x: x dim of patchified image
         patch_dim_y: y dim of patchified image
         patch_size_x: pixel number in x axis of a patch
         patch_size_y: pixel number in y axis of a patch
-        obs: coarsened water mask for RL training
 
     Returns:
 
