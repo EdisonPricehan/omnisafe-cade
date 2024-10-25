@@ -61,9 +61,17 @@ class EpisodeDataset(Dataset):
             episode = torch.cat([episode, padding], dim=0)
         return episode
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.padded_episodes[0])
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> Tuple[torch.Tensor, ...]:
+        """
+
+        Args:
+            idx: corresponds to the index of the episode in the dataset
+
+        Returns:
+            A tuple of all types of data in the idx episode
+        """
         return tuple(tensor[idx] for tensor in self.padded_episodes)
 
