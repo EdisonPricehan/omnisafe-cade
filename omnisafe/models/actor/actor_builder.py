@@ -41,6 +41,7 @@ class ActorBuilder:
         act_space (OmnisafeSpace): The space that defines valid actions.
         hidden_sizes (list[int]): The number of nodes at each hidden layer in the network.
         latent_size (int): Latent dimension of upstream recurrent network.
+        disable_no_op (bool): Whether disable the no operation action in Discrete action space.
         activation (str, optional): The activation function used after each layer. Defaults to ``'relu'``.
         weight_initialization_mode (str, optional): The method to initialize weights in the network.
                                                     Defaults to ``'kaiming_uniform'``.
@@ -52,6 +53,7 @@ class ActorBuilder:
         act_space: OmnisafeSpace,
         hidden_sizes: list[int],
         latent_size: int = 128,
+        disable_no_op: bool = True,
         activation: Activation = 'relu',
         weight_initialization_mode: InitFunction = 'kaiming_uniform',
     ) -> None:
@@ -62,6 +64,7 @@ class ActorBuilder:
         self._activation: Activation = activation
         self._hidden_sizes: list[int] = hidden_sizes
         self._latent_size: int = latent_size
+        self._disable_no_op: bool = disable_no_op
 
     # pylint: disable-next=too-many-return-statements
     def build_actor(
@@ -149,6 +152,7 @@ class ActorBuilder:
                 self._act_space,
                 self._hidden_sizes,
                 self._latent_size,
+                self._disable_no_op,
                 activation=self._activation,
                 weight_initialization_mode=self._weight_initialization_mode,
             )
