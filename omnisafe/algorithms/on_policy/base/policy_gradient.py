@@ -189,11 +189,16 @@ class PolicyGradient(BaseAlgo):
         self._logger.setup_torch_saver(what_to_save)
         self._logger.torch_save()
 
-        self._logger.register_key('Metrics/EpRet', window_length=50)
-        self._logger.register_key('Metrics/EpCost', window_length=50)
-        self._logger.register_key('Metrics/EpLen', window_length=50)
+        self._logger.register_key('Metrics/EpRet', window_length=10)
+        self._logger.register_key('Metrics/EpCost', window_length=10)
+        self._logger.register_key('Metrics/EpLen', window_length=10)
 
-        self._logger.register_key('Train/Epoch')
+        # No window average
+        # self._logger.register_key('Metrics/EpRet')
+        # self._logger.register_key('Metrics/EpCost')
+        # self._logger.register_key('Metrics/EpLen')
+
+        self._logger.register_key('Train/Epoch', window_length=1)
         self._logger.register_key('Train/Entropy')
         self._logger.register_key('Train/KL')
         self._logger.register_key('Train/StopIter')
@@ -249,6 +254,11 @@ class PolicyGradient(BaseAlgo):
                 agent=self._actor_critic,
                 buffer=self._buf,
                 logger=self._logger,
+                enable_safety_layer=(self._cfgs.algo_cfgs.use_safety_layer and
+                                     self._cfgs.algo_cfgs.use_sdm and
+                                     self._cfgs.algo_cfgs.use_cost and
+                                     epoch >= self._cfgs.model_cfgs.dynamics.engage_after_epochs),
+                safety_layer_use_reward=self._cfgs.algo_cfgs.safety_layer_use_reward,
             )
             self._logger.store({'Time/Rollout': time.time() - rollout_time})
 
@@ -311,6 +321,8 @@ class PolicyGradient(BaseAlgo):
         ep_cost = self._logger.get_stats('Metrics/EpCost')[0]
         ep_len = self._logger.get_stats('Metrics/EpLen')[0]
         self._logger.close()
+
+        self._env.close()
 
         return ep_ret, ep_cost, ep_len
 
