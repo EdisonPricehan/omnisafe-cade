@@ -222,6 +222,27 @@ def discount_cumsum(vector_x: torch.Tensor, discount: float) -> torch.Tensor:
     return vector_x
 
 
+def forward_discount_cumsum(vector_x: torch.Tensor, discount_factor: float) -> torch.Tensor:
+    """
+    Calculate the discounted return
+    Args:
+        vector_x: Can be thought as a sequence of rewards
+        discount_factor:
+
+    Returns:
+        The discounted return
+    """
+    length = vector_x.shape[0]
+    vector_x = vector_x.type(torch.float64)
+    cumsum = 0
+    discount = 1
+    for idx in range(length):
+        cumsum += vector_x[idx] * discount
+        vector_x[idx] = cumsum
+        discount *= discount_factor
+    return vector_x
+
+
 # pylint: disable-next=too-many-locals
 def conjugate_gradients(
     fisher_product: Callable[[torch.Tensor], torch.Tensor],
