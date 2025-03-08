@@ -52,7 +52,7 @@ class LatentMultiCategoricalActor(Actor):
 
         self._act_dim_list: List[int] = act_space.nvec
         self._act_dim_exec: int = len(act_space.nvec)
-        print(f'{self._act_dim_list=}')
+        # print(f'{self._act_dim_list=}')
 
         self.logits: nn.Module = build_mlp_network(
             sizes=[self._latent_size, *self._hidden_sizes, self._act_dim],

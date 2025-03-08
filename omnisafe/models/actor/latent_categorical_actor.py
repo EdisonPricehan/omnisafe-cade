@@ -40,6 +40,7 @@ class LatentCategoricalActor(Actor):
         act_space: OmnisafeSpace,
         hidden_sizes: list[int],
         latent_size: int = 128,
+        disable_no_op: bool = True,
         activation: Activation = 'relu',
         weight_initialization_mode: InitFunction = 'kaiming_uniform',
     ) -> None:
@@ -49,6 +50,9 @@ class LatentCategoricalActor(Actor):
         super().__init__(obs_space, act_space, hidden_sizes, activation, weight_initialization_mode)
 
         self._latent_size: int = latent_size
+        self._disable_no_op: bool = disable_no_op
+
+        print(f'Latent Categorical action space: {self._act_dim}, no_op disabled: {self._disable_no_op}')
 
         self.logits: nn.Module = build_mlp_network(
             sizes=[self._latent_size, *self._hidden_sizes, self._act_dim],
@@ -94,6 +98,11 @@ class LatentCategoricalActor(Actor):
             action = torch.argmax(self._current_dist.logits, dim=-1, keepdim=True)
         else:
             action = self._current_dist.sample()
+
+        # Disable no_op discrete action by shifting to right by 1
+        if self._disable_no_op:
+            action += 1
+
         return action.view(-1, int(np.array(self._act_space.shape).prod()))
 
     def forward(self, latent: torch.Tensor) -> Distribution:
