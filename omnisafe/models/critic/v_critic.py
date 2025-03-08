@@ -67,6 +67,7 @@ class VCritic(Critic):
             net = build_mlp_network(
                 sizes=[self._obs_dim, *self._hidden_sizes, 1],
                 activation=self._activation,
+                # output_activation='sigmoid',
                 weight_initialization_mode=self._weight_initialization_mode,
             )
             self.net_lst.append(net)
