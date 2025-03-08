@@ -128,6 +128,17 @@ class Config(dict):
     max_len: int
     num_threads: int
 
+    # Custom parameters for CADE
+    ep_ret_window_size: int
+    num_gru_layers: int
+    gru_lr: float
+    disable_no_op: bool
+    use_lagrangian: bool
+    use_sdm: bool
+    use_safety_layer: bool
+    safety_layer_use_reward: bool
+    use_mpc_lagrangian: bool
+
     def __init__(self, **kwargs: Any) -> None:
         """Initialize an instance of :class:`Config`."""
         for key, value in kwargs.items():
@@ -281,7 +292,8 @@ def __check_env_configs(configs: Config, env_type: str) -> None:
     if env_type == 'discrete':
         assert (
             configs.model_cfgs.actor_type == 'discrete' or
-            configs.model_cfgs.actor_type == 'latent_discrete'
+            configs.model_cfgs.actor_type == 'latent_discrete' or
+            configs.model_cfgs.actor_type == 'latent_multi_discrete'
         ), 'Discrete environments only support discrete actor!'
         assert configs.algo in [
             'NaturalPG',
