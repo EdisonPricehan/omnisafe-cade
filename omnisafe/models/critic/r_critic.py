@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from omnisafe.models.base import Critic
 from omnisafe.typing import Activation, InitFunction, OmnisafeSpace
-from omnisafe.utils.model import build_mlp_network
+from omnisafe.utils.model import build_mlp_network, get_act_dim
 
 
 class RCritic(Critic):
@@ -43,14 +43,17 @@ class RCritic(Critic):
             use_obs_encoder=False,
         )
         self._latent_size: int = latent_size
-        self.net_lst: list[nn.Module]
-        self.net_lst = []
+        self._act_exec_dim: int = get_act_dim(act_space, execution_dim=True)
+
+        self.net_lst: list[nn.Module] = []
 
         for idx in range(self._num_critics):
             # Maps latent to immediate reward
             net = build_mlp_network(
-                sizes=[self._latent_size, *self._hidden_sizes, 1],
+                # sizes=[self._latent_size, *self._hidden_sizes, 1],
+                sizes=[self._latent_size + self._act_exec_dim, *self._hidden_sizes, 1],  # obs+act dependence
                 activation=self._activation,
+                # output_activation='sigmoid',
                 weight_initialization_mode=self._weight_initialization_mode,
             )
             self.net_lst.append(net)
@@ -59,6 +62,7 @@ class RCritic(Critic):
     def forward(
         self,
         latent: torch.Tensor,
+        action: torch.Tensor,
     ) -> list[torch.Tensor]:
         """Forward function.
 
@@ -66,11 +70,13 @@ class RCritic(Critic):
 
         Args:
             latent (torch.Tensor): 1d latent variables from any recurrent network.
+            action (torch.Tensor): 1d action tensor upon this (latent) observation
 
         Returns:
             The R critic value (immediate reward) of latent.
         """
         res = []
+        latent_act = torch.cat([latent, action], dim=-1)
         for critic in self.net_lst:
-            res.append(torch.squeeze(critic(latent), -1))
+            res.append(torch.squeeze(critic(latent_act), -1))
         return res
