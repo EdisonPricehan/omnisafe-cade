@@ -21,7 +21,7 @@ import torch
 from omnisafe.common.buffer.base import BaseBuffer
 from omnisafe.typing import DEVICE_CPU, AdvatageEstimator, OmnisafeSpace
 from omnisafe.utils import distributed
-from omnisafe.utils.math import discount_cumsum, SlidingWindowFilter
+from omnisafe.utils.math import discount_cumsum, SlidingWindowFilter, forward_discount_cumsum
 from omnisafe.utils.model import get_obs_dim
 
 
@@ -61,9 +61,12 @@ class OnPolicyCACDBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
         act_space (OmnisafeSpace): The action space.
         size (int): The size of the buffer.
         gamma (float): The discount factor.
+        gamma_c (float): The discount factor for costs.
         lam (float): The lambda factor for calculating the advantages.
         lam_c (float): The lambda factor for calculating the advantages of the critic.
-        advantage_estimator (AdvatageEstimator): The advantage estimator.
+        lookahead_steps (int):
+        cost_limit (float): The episodic cost threshold
+        advantage_estimator (AdvantageEstimator): The advantage estimator.
         penalty_coefficient (float, optional): The penalty coefficient. Defaults to 0.
         standardized_adv_r (bool, optional): Whether to standardize the advantages of the actor.
             Defaults to False.
@@ -88,8 +91,11 @@ class OnPolicyCACDBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
         act_space: OmnisafeSpace,
         size: int,
         gamma: float,
+        gamma_c: float,
         lam: float,
         lam_c: float,
+        lookahead_steps: int,
+        cost_limit: float,
         advantage_estimator: AdvatageEstimator,
         penalty_coefficient: float = 0,
         standardized_adv_r: bool = False,
@@ -114,16 +120,21 @@ class OnPolicyCACDBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
         self.data['adv_c'] = torch.zeros((size,), dtype=torch.float32, device=device)
         self.data['value_c'] = torch.zeros((size,), dtype=torch.float32, device=device)
         self.data['target_value_c'] = torch.zeros((size,), dtype=torch.float32, device=device)
+        self.data['cost_pred'] = torch.zeros((size,), dtype=torch.float32, device=device)
 
         # For actor
         self.data['logp'] = torch.zeros((size,), dtype=torch.float32, device=device)
+        self.data['act_overlaid'] = torch.zeros((size,), dtype=torch.float32, device=device)
 
         # For semantic dynamics model
         self.data['next_obs'] = torch.zeros((size, get_obs_dim(obs_space)), dtype=torch.float32, device=device)
 
         self._gamma: float = gamma
+        self._gamma_c: float = gamma_c
         self._lam: float = lam
         self._lam_c: float = lam_c
+        self._H: int = lookahead_steps
+        self._cost_limit = cost_limit
         self._penalty_coefficient: float = penalty_coefficient
         self._advantage_estimator: AdvatageEstimator = advantage_estimator
         self.ptr: int = 0
@@ -183,19 +194,29 @@ class OnPolicyCACDBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
             last_value_c (torch.Tensor, optional): The value of the last state of the current path.
                 Defaults to torch.zeros(1).
         """
-        if last_r is None:
-            last_r = torch.zeros(1, device=self._device)
-        if last_value_c is None:
-            last_value_c = torch.zeros(1, device=self._device)
+        # if last_r is None:
+        #     last_r = torch.zeros(1, device=self._device)
+        # if last_value_c is None:
+        #     last_value_c = torch.zeros(1, device=self._device)
 
         path_slice = slice(self.path_start_idx, self.ptr)
-        last_r = last_r.to(self._device)
-        last_value_c = last_value_c.to(self._device)
-        rewards = torch.cat([self.data['reward'][path_slice], last_r])
-        rewards_pred = torch.cat([self.data['reward_pred'][path_slice], last_r])
-        # values_r = torch.cat([self.data['value_r'][path_slice], last_r])
-        costs = torch.cat([self.data['cost'][path_slice], last_value_c])
-        values_c = torch.cat([self.data['value_c'][path_slice], last_value_c])
+
+        # last_r = last_r.to(self._device)
+        # last_value_c = last_value_c.to(self._device)
+
+        # Original value critic sequence that postpend the value of the last state
+        # rewards = torch.cat([self.data['reward'][path_slice], last_r])
+        # rewards_pred = torch.cat([self.data['reward_pred'][path_slice], last_r])
+        # # values_r = torch.cat([self.data['value_r'][path_slice], last_r])
+        # costs = torch.cat([self.data['cost'][path_slice], last_value_c])
+        # # values_c = torch.cat([self.data['value_c'][path_slice], last_value_c])
+        # costs_pred = torch.cat([self.data['cost_pred'][path_slice], last_value_c])
+
+        # New immediate reward/cost estimator method that does not need the value of the last state
+        rewards = self.data['reward'][path_slice]
+        rewards_pred = self.data['reward_pred'][path_slice]
+        costs = self.data['cost'][path_slice]
+        costs_pred = self.data['cost_pred'][path_slice]
 
         # discountred_ret = discount_cumsum(rewards, self._gamma)[:-1]
         # self.data['discounted_ret'][path_slice] = discountred_ret
@@ -204,18 +225,26 @@ class OnPolicyCACDBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
 
         # Keep record of the maximum episode return for submodular advantage estimation
         # print(f'{rewards.shape=}')
+
+        # Return without discount
         ep_ret = torch.sum(rewards).item()
         self.max_ep_ret = max(ep_ret, self.max_ep_ret)
         self.mean_ep_ret = self.ep_ret_swf.mean(ep_ret)
+
+        # Discounted return
+        # disc_ep_ret = forward_discount_cumsum(rewards, discount_factor=self._gamma_c)[-1].item()
+        # self.max_ep_ret = max(disc_ep_ret, self.max_ep_ret)
+        # self.mean_ep_ret = self.ep_ret_swf.mean(disc_ep_ret)
 
         # print(f'Cur ep ret: {ep_ret}, Max ep ret: {self.max_ep_ret}, Mean ep ret: {self.mean_ep_ret}')
 
         if self._advantage_estimator == 'subm':
             # Calculate reward advantage in submodular manner (trajectory-wise)
-            adv_r = self._calculate_reward_adv_target(
+            adv_r = self._calculate_reward_adv(
                 rewards,
                 rewards_pred,
-                lam=self._lam)
+                gamma=self._gamma,
+            )
         else:
             # Calculate reward advantage state-wise
             adv_r, target_value_r = self._calculate_adv_and_value_targets(
@@ -225,10 +254,32 @@ class OnPolicyCACDBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
             )
 
         # Calculate cost advantage (and value) in GAE manner
-        adv_c, target_value_c = self._calculate_adv_and_value_targets(
-            values_c,
-            costs,
-            lam=self._lam_c,
+        # adv_c, target_value_c = self._calculate_adv_and_value_targets(
+        #     values_c,
+        #     costs,
+        #     lam=self._lam_c,
+        # )
+
+        # Calculate cost advantage for immediate costs
+        # adv_c = self._calculate_cost_adv(
+        #     costs=costs,
+        #     costs_pred=costs_pred,
+        #     lam=self._lam_c,
+        #     H=self._H,
+        # )
+
+        # Calculate cost advantage for immediate costs with cost limit
+        # adv_c = self._calculate_cost_adv_with_limit(
+        #     costs=costs,
+        #     costs_pred=costs_pred,
+        #     gamma=self._gamma_c,
+        # )
+
+        # Calculate cost advantage for immediate costs from one-step SDM prediction
+        adv_c = self._calculate_cost_adv_one_step(
+            costs=costs,
+            costs_pred=costs_pred,
+            gamma=self._gamma_c,
         )
 
         self.data['adv_r'][path_slice] = adv_r  # For reward critic update
@@ -236,7 +287,7 @@ class OnPolicyCACDBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
             self.data['target_value_r'][path_slice] = target_value_r
 
         self.data['adv_c'][path_slice] = adv_c  # For actor update
-        self.data['target_value_c'][path_slice] = target_value_c  # For cost critic update
+        # self.data['target_value_c'][path_slice] = target_value_c  # For cost critic update
 
         self.path_start_idx = self.ptr
 
@@ -253,44 +304,164 @@ class OnPolicyCACDBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
         Returns:
             The data stored and calculated in the buffer.
         """
-        self.ptr, self.path_start_idx = 0, 0
-
         data = {
-            'obs': self.data['obs'],
-            'act': self.data['act'],
-            'reward': self.data['reward'],
-            'reward_pred': self.data['reward_pred'],
-            'target_value_r': self.data['target_value_r'],
-            'done': self.data['done'],
-            'adv_r': self.data['adv_r'],
-            'logp': self.data['logp'],
+            'obs': self.data['obs'][:self.ptr],
+            'act': self.data['act'][:self.ptr],
+            'act_overlaid': self.data['act_overlaid'][:self.ptr],
+            'reward': self.data['reward'][:self.ptr],
+            'reward_pred': self.data['reward_pred'][:self.ptr],
+            'target_value_r': self.data['target_value_r'][:self.ptr],
+            'done': self.data['done'][:self.ptr],
+            'adv_r': self.data['adv_r'][:self.ptr],
+            'logp': self.data['logp'][:self.ptr],
             # 'discounted_ret': self.data['discounted_ret'],
-            'adv_c': self.data['adv_c'],
-            'target_value_c': self.data['target_value_c'],
-            'next_obs': self.data['next_obs'],
+            'adv_c': self.data['adv_c'][:self.ptr],
+            'target_value_c': self.data['target_value_c'][:self.ptr],
+            'cost': self.data['cost'][:self.ptr],
+            'cost_pred': self.data['cost_pred'][:self.ptr],
+            'next_obs': self.data['next_obs'][:self.ptr],
         }
 
-        adv_mean, adv_std, *_ = distributed.dist_statistics_scalar(data['adv_r'])
-        cadv_mean, *_ = distributed.dist_statistics_scalar(data['adv_c'])
+        adv_mean, adv_std, *_ = distributed.dist_statistics_scalar(data['adv_r'][:self.ptr])
+        # cadv_mean, *_ = distributed.dist_statistics_scalar(data['adv_c'])
+        cadv_mean, cadv_std, *_ = distributed.dist_statistics_scalar(data['adv_c'][:self.ptr])  # Use adv_std of cost
         if self._standardized_adv_r:
             data['adv_r'] = (data['adv_r'] - adv_mean) / (adv_std + 1e-8)
         if self._standardized_adv_c:
             data['adv_c'] = data['adv_c'] - cadv_mean
+        # if self._standardized_adv_c:
+        #     data['adv_c'] = (data['adv_c'] - cadv_mean) / (cadv_std + 1e-8)
+
+        self.ptr, self.path_start_idx = 0, 0
 
         return data
 
-    def _calculate_reward_adv_target(
+    def _calculate_reward_adv(
         self,
         rewards: torch.Tensor,
         rewards_pred: torch.Tensor,
-        lam: float,
+        gamma: float,
     ) -> torch.Tensor:
-        cumsum_rewards = discount_cumsum(rewards, 1)  # Backward, true
-        cumsum_rewards_pred = torch.cumsum(rewards_pred, dim=0)  # Forward, estimate
+        """
+        Calculate Marginal Gain (submodular) advantage
+        Args:
+            rewards:
+            rewards_pred:
+            gamma:
 
-        # adv_r = cumsum_rewards[1:] + cumsum_rewards_pred[:-1] - self.max_ep_ret  # Submodular
-        adv_r = cumsum_rewards[1:] + cumsum_rewards_pred[:-1] - self.mean_ep_ret  # Submodular
+        Returns:
+
+        """
+        cumsum_rewards = discount_cumsum(rewards, 1)  # Backward, actual
+        cumsum_rewards_pred = torch.cumsum(rewards_pred, dim=0)  # Forward, estimate
+        # cumsum_rewards_pred = torch.cumsum(rewards, dim=0)  # Forward, actual
+
+        # cumsum_rewards = discount_cumsum(rewards, gamma)  # Backward, actual, discounted
+        # cumsum_rewards_pred = forward_discount_cumsum(rewards_pred, discount_factor=gamma)  # Forward, estimate, discounted
+        # cumsum_rewards_pred = torch.cat([torch.Tensor([0]), cumsum_rewards_pred])  # The first element should be 0
+
+        # Geometric series of gamma
+        # exponents = torch.arange(cumsum_rewards.size()[0])
+        # gamma_series = gamma ** exponents
+
+        # adv_r = cumsum_rewards[1:] + cumsum_rewards_pred[:-1] - self.max_ep_ret  # Submodular w/ max baseline
+        # adv_r = cumsum_rewards[1:] + cumsum_rewards_pred[:-1] - self.mean_ep_ret  # Submodular w/ mean baseline
+        adv_r = cumsum_rewards + cumsum_rewards_pred - self.mean_ep_ret  # no last value, estimator only, mean baseline
+        # adv_r = cumsum_rewards * gamma_series + cumsum_rewards_pred[:-1] - self.mean_ep_ret  # no last value, mean baseline
+
+        # print(f'{rewards=}')
+        # print(f'{rewards_pred=}')
+        # print(f'{cumsum_rewards=}')
+        # print(f'{cumsum_rewards_pred=}')
+        # print(f'{adv_r=}')
+        # exit(0)
+
         return adv_r
+
+    def _calculate_cost_adv(
+        self,
+        costs: torch.Tensor,
+        costs_pred: torch.Tensor,
+        lam: float,
+        H: int,
+    ) -> torch.Tensor:
+        """
+        Calculate cost advantage based on actual immediate costs and predicted ones.
+
+        Args:
+            costs (torch.Tensor): Actual immediate costs.
+            costs_pred (torch.Tensor): Predicted immediate costs.
+            lam (float): Discount factor for future costs.
+            H (int): Look-ahead steps, if 0 then consume all remaining steps in the current trajectory.
+
+        Returns:
+            torch.Tensor: Estimated cost advantage for each timestep.
+        """
+        # Initialize an advantage tensor
+        cost_adv = torch.zeros_like(costs)[:-1]
+        n = costs.size(0) - 1
+
+        # Calculate cost advantage for each timestep
+        for t in range(n):
+            # Determine how many steps we can look ahead from timestep t
+            horizon = n - t if H == 0 else min(H, n - t)
+
+            # Compute the discounted cumulative cost for actual and predicted costs
+            actual_cum_cost = sum((lam ** k) * costs[t + k] for k in range(horizon))
+            pred_cum_cost = sum((lam ** k) * costs_pred[t + k] for k in range(horizon))
+
+            # Calculate the advantage as the difference
+            cost_adv[t] = actual_cum_cost - pred_cum_cost
+
+        return cost_adv
+
+    def _calculate_cost_adv_with_limit(
+        self,
+        costs: torch.Tensor,
+        costs_pred: torch.Tensor,
+        gamma: float,
+    ) -> torch.Tensor:
+        """
+        Calculate cost advantage based on actual immediate costs and predicted ones, and cost limit.
+        Args:
+            costs:
+            costs_pred:
+
+        Returns:
+
+        """
+        # cumsum_pred_bw = discount_cumsum(costs_pred, discount=1.0)  # backward accumulation of predicted costs
+        # cumsum_actual_fw = forward_cumsum(costs)  # forward accumulation of actual costs
+        # cost_adv = cumsum_pred_bw[1:] - (self._cost_limit - cumsum_actual_fw[:-1])
+
+        cumsum_pred_fw = forward_discount_cumsum(costs_pred, discount_factor=gamma)
+        cumsum_pred_fw = torch.cat([torch.Tensor([0]), cumsum_pred_fw])
+        cumsum_actual_bw = discount_cumsum(costs, discount=gamma)
+
+        exponents = torch.arange(cumsum_actual_bw.size()[0])
+        gamma_series = gamma ** exponents
+
+        # cost_adv = cumsum_actual_bw[1:] - (self._cost_limit - cumsum_pred_fw[:-1])
+        cost_adv = cumsum_actual_bw * gamma_series - (self._cost_limit - cumsum_pred_fw[:-1])
+
+        return cost_adv
+
+    def _calculate_cost_adv_one_step(
+        self,
+        costs: torch.Tensor,
+        costs_pred: torch.Tensor,
+        gamma: float,
+    ) -> torch.Tensor:
+        # Exponential mapping
+        # costs_pred_clipped = torch.clamp(costs_pred, min=0., max=1.)
+        # cost_adv = costs_pred_clipped ** 2
+
+        # Sigmoid mapping
+        k = 8
+        cost_baseline = 0.5
+        cost_adv = 1 / (1 + torch.exp(-k * (costs_pred - cost_baseline)))
+
+        return cost_adv
 
     def _calculate_adv_and_value_targets(
         self,
@@ -351,7 +522,7 @@ class OnPolicyCACDBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
         Raises:
             NotImplementedError: If the advantage estimator is not supported.
         """  # pylint: disable=line-too-long
-        if self._advantage_estimator == 'subm':
+        if self._advantage_estimator == 'subm':  # TODO this is temp solution to force cost advantage est to be gae
             adv_est = 'gae'
         else:
             adv_est = self._advantage_estimator

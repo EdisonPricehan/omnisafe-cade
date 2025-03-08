@@ -37,9 +37,12 @@ class VectorOnPolicyCACDBuffer(OnPolicyCACDBuffer):
         act_space (OmnisafeSpace): Action space.
         size (int): Size of the buffer.
         gamma (float): Discount factor.
+        gamma_c (float): The discount factor for costs.
         lam (float): Lambda for GAE.
         lam_c (float): Lambda for GAE for cost.
-        advantage_estimator (AdvatageEstimator): Advantage estimator.
+        lookahead_steps (int):
+        cost_limit (float):
+        advantage_estimator (AdvantageEstimator): Advantage estimator.
         penalty_coefficient (float): Penalty coefficient.
         standardized_adv_r (bool): Whether to standardize the advantage for reward.
         standardized_adv_c (bool): Whether to standardize the advantage for cost.
@@ -57,8 +60,11 @@ class VectorOnPolicyCACDBuffer(OnPolicyCACDBuffer):
         act_space: OmnisafeSpace,
         size: int,
         gamma: float,
+        gamma_c: float,
         lam: float,
         lam_c: float,
+        lookahead_steps: int,
+        cost_limit: float,
         advantage_estimator: AdvatageEstimator,
         penalty_coefficient: float,
         standardized_adv_r: bool,
@@ -74,14 +80,18 @@ class VectorOnPolicyCACDBuffer(OnPolicyCACDBuffer):
 
         if num_envs < 1:
             raise ValueError('num_envs must be greater than 0.')
+
         self.buffers: list[OnPolicyCACDBuffer] = [
             OnPolicyCACDBuffer(
                 obs_space=obs_space,
                 act_space=act_space,
                 size=size,
                 gamma=gamma,
+                gamma_c=gamma_c,
                 lam=lam,
                 lam_c=lam_c,
+                lookahead_steps=lookahead_steps,
+                cost_limit=cost_limit,
                 advantage_estimator=advantage_estimator,
                 penalty_coefficient=penalty_coefficient,
                 ep_ret_window_size=ep_ret_window_size,
@@ -134,6 +144,9 @@ class VectorOnPolicyCACDBuffer(OnPolicyCACDBuffer):
         cadv_mean, *_ = distributed.dist_statistics_scalar(data['adv_c'])
         if self._standardized_adv_r:
             data['adv_r'] = (data['adv_r'] - adv_mean) / (adv_std + 1e-8)
+            # adv_r = data['adv_r']
+            # print(f'{adv_r=} {adv_mean=} {adv_std=}')
+            # print(f'{adv_r.mean()=} {adv_mean=} {adv_std=}')
         if self._standardized_adv_c:
             data['adv_c'] = data['adv_c'] - cadv_mean
 
