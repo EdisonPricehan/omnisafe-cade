@@ -1,4 +1,5 @@
 from mlagents_envs.base_env import CameraPose
+from mlagents_envs.envs.unity_gym_env_v1 import DoneReason
 from mlagents_envs.envs.env_utils import make_unity_env
 from mlagents_envs.side_channel.agent_reset_channel import AgentResetChannel
 from mlagents_envs import logging_util
@@ -64,6 +65,13 @@ def load_vae_model() -> nn.Module:
     return vae_model
 
 
+def get_done_reason(reason_value: int) -> str:
+    try:
+        return DoneReason(reason_value).name
+    except ValueError:
+        return 'Unknown done reason.'
+
+
 @env_register
 class RiverineEnv(CMDP):
     _support_envs: ClassVar[list[str]] = ['easy', 'medium', 'hard']
@@ -89,7 +97,7 @@ class RiverineEnv(CMDP):
         env_id: str = '',
         env_path: Optional[str] = None,
         use_vae: bool = False,
-        water_perc_thr: float = 0.7,
+        water_perc_thr: float = 0.5,
         device: Union[torch.device, str] = DEVICE_CPU,
         max_idle_steps: int = 50,
         **kwargs,
@@ -157,18 +165,16 @@ class RiverineEnv(CMDP):
     def get_cost_from_obs_tensor(self, obs: torch.Tensor) -> torch.Tensor:
         return self.env.cur_cost
 
-    def step(self, action: torch.Tensor) \
-        -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+    def step(self, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         # obs is a list of RGB image and water mask arrays
         obs, rew, cost, term, trunc, info = self.env.step(action.tolist())
         self.rgb, self.mask, self.rgb_mask = self.env.render()
 
         if self.use_vae:  # VAE encoding
             assert self._vae_model is not None
-            obs = self.get_vae_embedding()
+            obs_vec = self.get_vae_embedding()
         else:  # Patchification
-            # obs = self.get_patchified_mask(obs)
-            obs = get_patchified_mask(
+            obs_vec = get_patchified_mask(
                 mask=obs[1],
                 is_uint8=True,
                 patch_size_x=self.patch_size_x,
@@ -178,14 +184,23 @@ class RiverineEnv(CMDP):
                 patch_threshold=self.water_perc_thr,
             )
 
-        obs, rew, cost, term, trunc = (torch.as_tensor(x, dtype=torch.float32, device=self._device)
-                                       for x in (obs, rew, cost, term, trunc))
+            # Update immediate cost
+            # if not term:
+            #     obs_mask = np.reshape(obs_vec, (self.patch_dim_x, self.patch_dim_y))
+            #     cost = self.get_water_iou_cost(obs_mask)
 
-        new_info = {'final_observation': obs}
+        # Upscale reward so that per-step max reward is 1
+        # if abs(rew) > 1e-6:
+        #     rew = 1
+
+        obs_vec, rew, cost, term, trunc = (torch.as_tensor(x, dtype=torch.float32, device=self._device)
+                                       for x in (obs_vec, rew, cost, term, trunc))
+
+        new_info = {'final_observation': obs_vec}
         if hasattr(info['step'], 'done_reason'):
             # print(f'riverine env done reason: {info["step"].done_reason}')
             new_info['done_reason'] = info['step'].done_reason[0]
-        return obs, rew, cost, term, trunc, new_info
+        return obs_vec, rew, cost, term, trunc, new_info
 
     # Deprecated
     @staticmethod
@@ -198,10 +213,10 @@ class RiverineEnv(CMDP):
             self.set_seed(seed)
 
         if not self.is_first_reset:
-            # TODO
+            # TODO manual reset is not available for now
             # channel_reset.set_reset_pose(False, self.reset_pose.x, self.reset_pose.y, self.reset_pose.z,
             #                              self.reset_pose.yaw)
-            channel_reset.set_reset_pose(True)  # use random reset for now
+            channel_reset.set_reset_pose(random_reset=True)  # use random reset for now
             print(f'Current reset pose: {self.reset_pose}')
 
         obs = self.env.reset()
@@ -211,7 +226,6 @@ class RiverineEnv(CMDP):
             assert self._vae_model is not None
             obs = self.get_vae_embedding()
         else:
-            # obs = self.get_patchified_mask(obs)
             obs = get_patchified_mask(
                 mask=obs[1],
                 is_uint8=True,
@@ -263,6 +277,90 @@ class RiverineEnv(CMDP):
         patch_dim_x: int = ((image_size - self.patch_size_x) // self.patch_step) + 1
         patch_dim_y: int = ((image_size - self.patch_size_y) // self.patch_step) + 1
         return patch_dim_x, patch_dim_y
+
+    def get_water_iou_cost(self, mask_obs: np.ndarray) -> float:
+        """
+        Calculate the IoU-based cost for the water mask observation against a predefined trapezoidal mask.
+
+        Args:
+            mask_obs (np.ndarray): Observation mask (H x W) as 2D array.
+
+        Returns:
+            float: IoU-based cost, calculated as (1 - IoU) / 20.
+        """
+        assert mask_obs is not None, f'mask obs is None'
+        assert len(mask_obs.shape) == 2, f'mask obs has wrong dimension {mask_obs.shape}'
+
+        mask_trapezoid = self.create_trapezoidal_mask(
+            top_width=4,
+            down_width=10,
+            trapezoid_height=14,
+        )  # TODO these values can be percentages
+
+        # print(f'mask obs:')
+        # print(f'{mask_obs}')
+        #
+        # print(f'mask trap:')
+        # print(f'{mask_trapezoid}')
+
+        # Compute intersection and union directly
+        intersection = np.logical_and(mask_obs == 1, mask_trapezoid == 255).sum()
+        union = np.logical_or(mask_obs == 1, mask_trapezoid == 255).sum()
+
+        # Avoid division by zero
+        iou = intersection / (union + 1e-6)
+
+        # Calculate IoU-based cost
+        iou_cost = 1.0 - iou
+        return iou_cost / 20  # Downscale immediate cost
+
+    def create_trapezoidal_mask(
+        self,
+        top_width: int,
+        down_width: int,
+        trapezoid_height: int,
+    ) -> np.ndarray:
+        """
+        Create a trapezoidal mask for a square observation, with the trapezoid's bottom side aligned to the bottom of the observation.
+
+        Args:
+            top_width (int): Width of the trapezoid at the top.
+            down_width (int): Width of the trapezoid at the bottom.
+            trapezoid_height (int): Height of the trapezoid.
+
+        Returns:
+            np.ndarray: A binary mask (2D array) with the trapezoidal region filled with 1s.
+        """
+        assert top_width < self.patch_dim_x, f'{top_width} should be less than obs side len {self.patch_dim_x}'
+        assert down_width < self.patch_dim_x, f'{down_width} should be less than obs side len {self.patch_dim_x}'
+        assert trapezoid_height < self.patch_dim_x, f'{trapezoid_height} should be less than obs side len {self.patch_dim_x}'
+        assert top_width <= down_width, f'{top_width} should not be greater than {down_width}'
+
+        # Initialize the mask with zeros
+        mask = np.zeros((self.patch_dim_x, self.patch_dim_x), dtype=np.uint8)
+
+        # Calculate the vertical positions for the trapezoid
+        bottom_y = self.patch_dim_x  # Bottom edge of the observation
+        top_y = bottom_y - trapezoid_height  # Top edge of the trapezoid
+
+        # Calculate the horizontal positions for the top and bottom edges of the trapezoid
+        top_left = (self.patch_dim_x - top_width) // 2
+        top_right = top_left + top_width
+        bottom_left = (self.patch_dim_x - down_width) // 2
+        bottom_right = bottom_left + down_width
+
+        # Fill in the trapezoidal area
+        for y in range(top_y, bottom_y):
+            # Interpolate the width of the trapezoid at the current height
+            alpha = (y - top_y) / trapezoid_height
+            current_left = int((1 - alpha) * top_left + alpha * bottom_left)
+            current_right = int((1 - alpha) * top_right + alpha * bottom_right + 1)
+            current_right = min(current_right, self.patch_dim_x)
+
+            # Fill the row in the trapezoidal range
+            mask[y, current_left:current_right] = 255
+
+        return mask
 
     def set_seed(self, seed: int) -> None:
         logger.warning('Setting env seed is not supported!')
@@ -347,7 +445,9 @@ if __name__ == '__main__':
     # Make sure env is ready
     obs, _ = env.reset()
     while not env.render_available():
+        print(f'Reset again until rendered observations are available.')
         obs, _ = env.reset()
+    print(f'Rendering is available!')
 
     rgb_canvas = axes[0, 0].imshow(env.rgb)
     mask_canvas = axes[1, 0].imshow(env.mask)
@@ -372,6 +472,9 @@ if __name__ == '__main__':
 
             obs, reward, cost, terminated, truncated, info = env.step(torch.Tensor(action))
 
+            if not np.all(np.array(action) == 1):
+                print(f'Action: {action}, reward: {reward:.2f}, cost: {cost:.2f}')
+
             rgb, mask, mixed = env.render()
 
             rgb_canvas.set_data(rgb)
@@ -395,7 +498,7 @@ if __name__ == '__main__':
             if terminated or truncated:
                 assert 'done_reason' in info, f'{info=}'
                 done_reason = info['done_reason']
-                print(f'{done_reason=}')
+                print(f'Done reason: {get_done_reason(done_reason)}')
                 env.reset()
     except KeyboardInterrupt:
         print(f'Interrupted by user.')
