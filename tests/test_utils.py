@@ -34,7 +34,7 @@ from omnisafe.utils.math import (
     discount_cumsum,
     get_diagonal,
     get_transpose,
-    iou_loss,
+    iou,
     l1_loss,
 )
 from omnisafe.utils.model import get_activation, initialize_layer
@@ -242,7 +242,7 @@ def test_iou(tolerance: float = 1e-6):
     # 3D input
     preds = torch.tensor([[[0, 1, 1], [1, 1, 0], [0, 0, 1]]], dtype=torch.float32)
     targets = torch.tensor([[[1, 1, 0], [0, 1, 1], [0, 0, 1]]], dtype=torch.float32)
-    iou = iou_loss(preds, targets, threshold=0.5)
+    iou_value = iou(preds, targets, threshold=0.5)
     iou_true = 3 / 7
-    assert torch.isclose(iou, torch.Tensor([iou_true]), atol=tolerance).all(), f"IoU: {iou}, gt: {iou_true}"
+    assert torch.isclose(iou_value, torch.Tensor([iou_true]), atol=tolerance).all(), f"IoU: {iou_value}, gt: {iou_true}"
 
