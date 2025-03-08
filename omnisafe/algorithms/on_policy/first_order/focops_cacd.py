@@ -25,12 +25,14 @@ from torch.nn.utils.clip_grad import clip_grad_norm_
 
 from rich.progress import track
 from typing import Any, Union, List
+from gymnasium.spaces import Discrete, MultiDiscrete
 
 from omnisafe.adapter.onpolicy_cacd_adapter import OnPolicyCACDAdapter
 from omnisafe.algorithms import registry
 from omnisafe.algorithms.on_policy.base.policy_gradient import PolicyGradient
 from omnisafe.common.buffer import VectorOnPolicyCACDBuffer
 from omnisafe.common.lagrange import Lagrange
+from omnisafe.common.mpc_lagrange import MPCLagrange
 from omnisafe.utils import distributed
 from omnisafe.typing import AdvatageEstimator
 from omnisafe.utils.episode_dataset import EpisodeDataset
@@ -75,13 +77,20 @@ class FOCOPS_CACD(PolicyGradient):
 
         The FOCOPS algorithm uses a Lagrange multiplier to balance the cost and reward.
         """
+        # Expand buffer size by 1 episode length
+        size: int = self._steps_per_epoch + self._cfgs.train_cfgs.max_episode_steps
+
         self._buf: VectorOnPolicyCACDBuffer = VectorOnPolicyCACDBuffer(
             obs_space=self._env.observation_space,
             act_space=self._env.action_space,
-            size=self._steps_per_epoch,
+            # size=self._steps_per_epoch,
+            size=size,
             gamma=self._cfgs.algo_cfgs.gamma,
+            gamma_c=self._cfgs.algo_cfgs.cost_gamma,
             lam=self._cfgs.algo_cfgs.lam,
             lam_c=self._cfgs.algo_cfgs.lam_c,
+            lookahead_steps=self._cfgs.algo_cfgs.lookahead_steps,
+            cost_limit=self._cfgs.lagrange_cfgs.cost_limit,
             advantage_estimator=self._cfgs.algo_cfgs.adv_estimation_method,
             standardized_adv_r=self._cfgs.algo_cfgs.standardized_rew_adv,
             standardized_adv_c=self._cfgs.algo_cfgs.standardized_cost_adv,
@@ -90,8 +99,29 @@ class FOCOPS_CACD(PolicyGradient):
             device=self._device,
         )
 
-        self._lagrange: Lagrange = Lagrange(**self._cfgs.lagrange_cfgs)
+        if self._cfgs.algo_cfgs.use_mpc_lagrangian:
+            # MPC Lagrange
+            self._lagrange: MPCLagrange = MPCLagrange(
+                cacd=self._actor_critic,
+                horizon=3,
+                rollout_num=5,
+                buffer=self._buf.buffers[0],
+                alpha_init=0.99,
+                **self._cfgs.lagrange_cfgs,
+            )
+        else:
+            # Standard Lagrange
+            self._lagrange: Lagrange = Lagrange(**self._cfgs.lagrange_cfgs)
+
         self._advantage_estimation_method: AdvatageEstimator = self._cfgs.algo_cfgs.adv_estimation_method
+
+        # Exponential moving average (EMA) of actor loss and reward estimator loss
+        self._pi_loss_mean: float = 0
+        self._reward_loss_mean: float = 0
+        # self._beta: float = 0.1  # Smoothing factor
+        self._beta: float = 0.9  # Smoothing factor
+        self._last_loss_pi: float = 1.0
+        self._last_loss_r: float = 1.0
 
     def _init_model(self) -> None:
         self._actor_critic: ConstraintActorCriticDynamics = ConstraintActorCriticDynamics(
@@ -110,6 +140,8 @@ class FOCOPS_CACD(PolicyGradient):
         #         std=self._cfgs.model_cfgs.std_range,
         #     )
 
+        self._disable_no_op: bool = self._cfgs.model_cfgs.disable_no_op
+
     def _init_log(self) -> None:
         """Log the FOCOPS specific information.
 
@@ -122,14 +154,24 @@ class FOCOPS_CACD(PolicyGradient):
         super()._init_log()
 
         # Setup additional keys that need to be logged
-        self._logger.register_key('Metrics/LagrangeMultiplier')
+        self._logger.register_key('Metrics/LagrangeMultiplier', window_length=1)  # keep the latest value
         self._logger.register_key('Metrics/EpRetMean')
         self._logger.register_key('Metrics/EpRetMax')
         self._logger.register_key('Train/PolicyStd')
-        self._logger.register_key('Loss/Loss_reward_estimator', delta=True)
-        self._logger.register_key('Loss/Loss_sdm', delta=True)
+        self._logger.register_key('Train/PolicyRatioClipped')
+        self._logger.register_key('Loss/Loss_reward_estimator')
+        self._logger.register_key('Loss/Loss_sdm')
+        self._logger.register_key('Loss/Loss_reward_ratio')
+        self._logger.register_key('Loss/Loss_policy_ratio')
+        self._logger.register_key('Loss/Loss_cost_estimator')
         self._logger.register_key('Value/Adv_r')
         self._logger.register_key('Value/Adv_c')
+        if self._cfgs.algo_cfgs.use_mpc_lagrangian:
+            self._logger.register_key('Metrics/MPCLagrangeMultiplier')
+            self._logger.register_key('Metrics/MPCAlpha')
+
+        # For safety layer
+        self._logger.register_key('Train/ActionOverlaid')
 
         # Setup models that need to be saved regularly
         what_to_save: dict[str, Any] = {
@@ -138,10 +180,11 @@ class FOCOPS_CACD(PolicyGradient):
         self._logger.setup_torch_saver(what_to_save)
         self._logger.torch_save()
 
-    def _loss_pi(
+    def _loss_pi_safe(
         self,
         distribution: Union[Distribution, List[Distribution]],
         act: torch.Tensor,
+        act_overlaid: torch.Tensor,
         logp: torch.Tensor,
         adv: torch.Tensor,
     ) -> torch.Tensor:
@@ -174,6 +217,14 @@ class FOCOPS_CACD(PolicyGradient):
         Returns:
             The loss of pi/actor.
         """
+        if self._disable_no_op:
+            if isinstance(self._actor_critic.act_space, Discrete):
+                act -= 1
+            elif isinstance(self._actor_critic.act_space, MultiDiscrete):
+                pass  # TODO
+            else:
+                raise NotImplementedError
+
         logp_ = self._actor_critic.actor.log_prob(act)
         # std = self._actor_critic.actor.std
         if isinstance(distribution, list):  # Multi-discrete
@@ -182,19 +233,46 @@ class FOCOPS_CACD(PolicyGradient):
         else:
             _, std = get_dist_mean_std(distribution)
         ratio = torch.exp(logp_ - logp)
+        ratio_clipped = torch.clamp(
+            ratio,
+            1 - self._cfgs.algo_cfgs.clip,
+            1 + self._cfgs.algo_cfgs.clip,
+        )
 
+        # Calculate KLD of current policy from the initial policy that interacted with the environment
         if isinstance(distribution, list):  # Multi-discrete
             kl = kld_multi_categorical(distribution, self._p_dist)
         else:
             kl = torch.distributions.kl_divergence(distribution, self._p_dist).sum(-1, keepdim=True)
 
-        loss = (kl - (1 / self._cfgs.algo_cfgs.focops_lam) * ratio * adv) * (
-            kl.detach() <= self._cfgs.algo_cfgs.focops_eta
-        ).type(torch.float32)
+        # Safe action used to update policy regardless of kld
+        # kl_mask = kl.detach() <= self._cfgs.algo_cfgs.focops_eta
+        # combined_mask = kl_mask | act_overlaid.type(torch.bool)
+        # loss = (kl - (1 / self._cfgs.algo_cfgs.focops_lam) * ratio * adv) * combined_mask.type(torch.float32)
+
+        # Use unclipped ratio (FOCOPS original version)
+        loss = ((kl - (1 / self._cfgs.algo_cfgs.focops_lam) * ratio * adv) *
+                (kl.detach() <= self._cfgs.algo_cfgs.focops_eta).type(torch.float32))
+
+        # Use symmetrically clipped ratio
+        # loss = (kl - (1 / self._cfgs.algo_cfgs.focops_lam) * ratio_clipped * adv) * (
+        #     kl.detach() <= self._cfgs.algo_cfgs.focops_eta
+        # ).type(torch.float32)
+
+        # Use asymmetrically clipped ratio
+        # loss = (kl - (1 / self._cfgs.algo_cfgs.focops_lam) * torch.min(ratio_clipped * adv, ratio * adv)) * (
+        #     kl.detach() <= self._cfgs.algo_cfgs.focops_eta
+        # ).type(torch.float32)
+
+        # Use asymmetrically clipped ratio without kld loss (PPO)
+        # loss = -torch.min(ratio_clipped * adv, ratio * adv)
+
         loss = loss.mean()
 
+        # Add entropy to loss
         if isinstance(distribution, list):
-            loss -= self._cfgs.algo_cfgs.entropy_coef * torch.sum(torch.stack([dist.entropy().mean() for dist in distribution]))
+            loss -= self._cfgs.algo_cfgs.entropy_coef * torch.sum(
+                torch.stack([dist.entropy().mean() for dist in distribution]))
         else:
             loss -= self._cfgs.algo_cfgs.entropy_coef * distribution.entropy().mean()
 
@@ -208,6 +286,7 @@ class FOCOPS_CACD(PolicyGradient):
                 'Train/Entropy': entropy,
                 'Train/PolicyRatio': ratio,
                 'Train/PolicyStd': std,
+                'Train/PolicyRatioClipped': ratio_clipped,
                 'Loss/Loss_pi': loss.mean().item(),
             },
         )
@@ -218,7 +297,7 @@ class FOCOPS_CACD(PolicyGradient):
         reward: torch.Tensor,
         reward_pred: torch.Tensor,
     ) -> torch.Tensor:
-        loss = nn.functional.mse_loss(reward_pred, reward)
+        loss = nn.functional.mse_loss(reward_pred.squeeze(), reward.squeeze())
 
         if self._cfgs.algo_cfgs.use_critic_norm:
             for param in self._actor_critic.reward_critic.parameters():
@@ -245,10 +324,13 @@ class FOCOPS_CACD(PolicyGradient):
         Returns:
             The advantage function combined with reward and cost.
         """
-        return (adv_r - self._lagrange.lagrangian_multiplier * adv_c) / (
-            1 + self._lagrange.lagrangian_multiplier
-        )
-        # return adv_r - self._lagrange.lagrangian_multiplier * adv_c
+        if self._cfgs.algo_cfgs.use_lagrangian:
+            # return (adv_r - self._lagrange.lagrangian_multiplier * adv_c) / (1 + self._lagrange.lagrangian_multiplier)
+
+            # TODO a simplified version of advantage without downscaling with the multiplier
+            return adv_r - self._lagrange.lagrangian_multiplier * adv_c
+        else:
+            return super()._compute_adv_surrogate(adv_r=adv_r, adv_c=adv_c)
 
     def _update(self) -> None:
         r"""Update actor, reward/cost critic, Lagrange multiplier and dynamics model parameters.
@@ -258,17 +340,30 @@ class FOCOPS_CACD(PolicyGradient):
         Then in each iteration of the policy update, FOCOPS calculates current policy's
         distribution, which used to calculate the policy loss.
         """
-        # note that logger already uses MPI statistics across all processes.
-        Jc = self._logger.get_stats('Metrics/EpCost')[0]
+        if not self._cfgs.algo_cfgs.use_mpc_lagrangian:
+            # Only update lagrange multiplier when reached certain epochs
+            # cur_epochs = self._logger.get_stats('Train/Epoch')[0]
+            # # TODO temp update lagrange after certain epochs
+            # if cur_epochs > self._cfgs.model_cfgs.dynamics.engage_after_epochs:
+            #
+            #     # note that logger already uses MPI statistics across all processes.
+            #     Jc = self._logger.get_stats('Metrics/EpCost')[0]
+            #
+            #     # first update Lagrange multiplier parameter
+            #     self._lagrange.update_lagrange_multiplier(Jc)
 
-        # first update Lagrange multiplier parameter
-        self._lagrange.update_lagrange_multiplier(Jc)
+            # note that logger already uses MPI statistics across all processes.
+            Jc = self._logger.get_stats('Metrics/EpCost')[0]
+
+            # first update Lagrange multiplier parameter
+            self._lagrange.update_lagrange_multiplier(Jc)
 
         # Get all needed data from buffer
         data = self._buf.get()
-        obs, act, logp, done, reward, reward_pred, next_obs, target_value_c, adv_r, adv_c = (
+        obs, act, act_overlaid, logp, done, reward, reward_pred, next_obs, target_value_c, adv_r, adv_c, cost, cost_pred = (
             data['obs'],
             data['act'],
+            data['act_overlaid'],
             data['logp'],
             data['done'],
             data['reward'],
@@ -277,6 +372,8 @@ class FOCOPS_CACD(PolicyGradient):
             data['target_value_c'],
             data['adv_r'],
             data['adv_c'],
+            data['cost'],
+            data['cost_pred'],
         )
         if self._advantage_estimation_method != 'subm':
             target_value_r = data['target_value_r']
@@ -285,18 +382,20 @@ class FOCOPS_CACD(PolicyGradient):
 
         # Construct an episode dataset with only observation
         episode_dataset = EpisodeDataset(
-                (
-                    obs,
-                 ),
-                done_tensor=done,
-                padding=self._cfgs.algo_cfgs.ep_padding,
-                max_seq_len=self._cfgs.train_cfgs.max_episode_steps,
-            )
+            (
+                obs,
+                act,
+            ),
+            done_tensor=done,
+            padding=self._cfgs.algo_cfgs.ep_padding,
+            max_seq_len=self._cfgs.train_cfgs.max_episode_steps,
+        )
 
         # Get the current actor's action distribution for KL divergence calculation
-        gru_obs = episode_dataset.padded_episodes[0]  # Episode (Batch) x Sequence x Feature
+        ep_obs_list = episode_dataset.padded_episodes[0]  # List of episodes of obs: Episode (Batch) x Sequence x Feature
+        ep_act_list = episode_dataset.padded_episodes[1]  # List of episodes of act
         with torch.no_grad():
-            old_distribution: Union[Categorical, List[Categorical]] = self._actor_critic.forward_actor(gru_obs)
+            old_distribution: Union[Categorical, List[Categorical]] = self._actor_critic.forward_actor(ep_obs_list, ep_act_list)
 
         if isinstance(old_distribution, list):
             old_logits = logits_from_multi_categorical(old_distribution)
@@ -309,6 +408,7 @@ class FOCOPS_CACD(PolicyGradient):
             (
                 obs,
                 act,
+                act_overlaid,
                 logp,
                 old_logits,
                 reward,
@@ -318,6 +418,8 @@ class FOCOPS_CACD(PolicyGradient):
                 target_value_c,
                 adv_r,
                 adv_c,
+                cost,
+                cost_pred,
             ),
             done_tensor=done,
             padding=self._cfgs.algo_cfgs.ep_padding,
@@ -336,6 +438,7 @@ class FOCOPS_CACD(PolicyGradient):
             for (
                 obs,
                 act,
+                act_overlaid,
                 logp,
                 old_logits,
                 reward,
@@ -345,46 +448,74 @@ class FOCOPS_CACD(PolicyGradient):
                 target_value_c,
                 adv_r,
                 adv_c,
+                cost,
+                cost_pred,
             ) in episode_dataloader:
+                # Step 1: Update semantic dynamics model
+                if self._cfgs.algo_cfgs.use_sdm:
+                    obs, act, next_obs = self._view2d(obs), self._view2d(act), self._view2d(next_obs)
+                    self._update_sdm(obs=obs, act=act, next_obs=next_obs)
+
+                # Step 2: Update cost (value) critic
+                if self._cfgs.algo_cfgs.use_cost:
+                    # target_value_c = self._view2d(target_value_c, squeeze=True)
+                    # self._update_cost_critic(obs, target_value_c)
+
+                    cost = self._view2d(cost, squeeze=True)
+                    # self._update_cost_critic(obs, cost)
+                    self._update_cost_critic(next_obs, cost)  # cost corresponds to the next obs
+
+                # Step 3: Update Lagrangian multiplier
+                if self._cfgs.algo_cfgs.use_mpc_lagrangian:
+                    assert self._cfgs.algo_cfgs.use_sdm, f'Needs to enable use_sdm for mpc lagrangian update.'
+                    assert self._cfgs.algo_cfgs.use_cost, f'Needs to enable use_cost for mpc lagrangian update.'
+
+                    episodic_cost = torch.sum(cost)
+                    self._lagrange.update_lagrange_multiplier(Jc=episodic_cost.item(), ep_states=obs)
+
+                    self._logger.store(
+                        {
+                            'Metrics/MPCLagrangeMultiplier': self._lagrange.lagrangian_multiplier,
+                            'Metrics/MPCAlpha': torch.sigmoid(self._lagrange.alpha_raw),
+                        }
+                    )
+
+                # Step 4 and 5: Update actor and reward estimator
                 if kl_early_stopped:  # Update reward estimator only
                     if self._advantage_estimation_method == 'subm':
                         reward = self._view2d(reward, squeeze=True)
-                        self._update_reward_function(obs, reward)
+                        act = self._view2d(act)
+                        self._update_reward_estimator(obs, act, reward)
                     else:
                         target_value_r = self._view2d(target_value_r, squeeze=True)
                         self._update_reward_critic(obs, target_value_r)
                 else:  # Update actor and (immediate) reward estimator
                     if isinstance(self._actor_critic.actor, LatentMultiCategoricalActor):
-                        self._p_dist = [Categorical(logits=split) for split in torch.split(old_logits, list(self._actor_critic.actor._act_dim_list), dim=-1)]
+                        self._p_dist = [Categorical(logits=split) for split in
+                                        torch.split(old_logits, list(self._actor_critic.actor._act_dim_list), dim=-1)]
                     else:
                         self._p_dist = Categorical(logits=old_logits)
 
-                    act, logp, adv_r, adv_c, reward, target_value_r = (
+                    act, act_overlaid, logp, adv_r, adv_c, reward, target_value_r = (
                         self._view2d(act),
+                        self._view2d(act_overlaid),
                         self._view2d(logp),
                         self._view2d(adv_r),
                         self._view2d(adv_c),
                         self._view2d(reward, squeeze=True),
                         self._view2d(target_value_r, squeeze=True),
                     )
-                    self._update_actor_and_reward(obs, act, logp, adv_r, adv_c,
+
+                    if self._cfgs.algo_cfgs.use_sdm:  # revert to 3 dim
+                        obs = obs.unsqueeze(0)  # [Batch, Sequence, Feature]
+
+                    self._update_actor_and_reward(obs, act, act_overlaid, logp, adv_r, adv_c,
                                                   reward if self._advantage_estimation_method == 'subm' else target_value_r)
-
-                # Update semantic dynamics model
-                if self._cfgs.algo_cfgs.use_sdm:
-                    obs, act, next_obs = self._view2d(obs), self._view2d(act), self._view2d(next_obs)
-                    self._update_sdm(obs=obs, act=act, next_obs=next_obs)
-
-                # Update cost (value) critic
-                if self._cfgs.algo_cfgs.use_cost:
-                    target_value_c = self._view2d(target_value_c, squeeze=True)
-                    self._update_cost_critic(obs, target_value_c)
 
             if kl_early_stopped:
                 continue
 
-            new_distribution = self._actor_critic.forward_actor(gru_obs)
-
+            new_distribution = self._actor_critic.forward_actor(ep_obs_list, ep_act_list)
             if isinstance(new_distribution, list):
                 kl = kld_multi_categorical(old_distribution, new_distribution)
             else:
@@ -406,18 +537,28 @@ class FOCOPS_CACD(PolicyGradient):
                 else:
                     kl_early_stopped = True
 
+        # Log advantage
+        adv = self._compute_adv_surrogate(adv_r, adv_c)
         self._logger.store(
             {
                 'Train/StopIter': final_steps,
                 'Value/Adv_r': adv_r.mean().item(),
                 'Value/Adv_c': adv_c.mean().item(),
-                'Metrics/LagrangeMultiplier': self._lagrange.lagrangian_multiplier,
+                'Value/Adv': adv.mean().item(),
             },
         )
 
+        # Log lagrange multiplier
+        if not self._cfgs.algo_cfgs.use_mpc_lagrangian:
+            self._logger.store(
+                {
+                    'Metrics/LagrangeMultiplier': self._lagrange.lagrangian_multiplier,
+                }
+            )
+
     def _view2d(self, tensor: torch.Tensor, squeeze: bool = False) -> torch.Tensor:
-        if tensor.dim() == 2:  # Batch x Sequence
-            tensor = tensor.unsqueeze(-1)
+        if tensor.dim() == 2:  # Batch x Feature
+            tensor = tensor.unsqueeze(1)  # Batch x Sequence x Feature
 
         if tensor.dim() == 3:  # Batch x Sequence x Feature
             batch_size, sequence_length, feature_size = tensor.shape
@@ -437,25 +578,48 @@ class FOCOPS_CACD(PolicyGradient):
         self,
         obs: torch.Tensor,
         act: torch.Tensor,
+        act_overlaid: torch.Tensor,
         logp: torch.Tensor,
         adv_r: torch.Tensor,
         adv_c: torch.Tensor,
         reward: torch.Tensor,
     ) -> None:
         # Forward pass actor and reward estimator to get network outputs
-        distribution, reward_pred = self._actor_critic.forward_actor_reward(obs)
+        distribution, reward_pred = self._actor_critic.forward_actor_reward(obs, act)
 
         # Calculate losses
         adv = self._compute_adv_surrogate(adv_r, adv_c)
-        loss_pi = self._loss_pi(distribution, act, logp, adv)
+        # loss_pi = self._loss_pi(distribution, act, logp, adv)  # original version
+        loss_pi = self._loss_pi_safe(distribution, act, act_overlaid, logp, adv)  # safe version
         loss_r = self._loss_reward(reward, reward_pred[0])  # either for reward function or critic
-        loss = loss_pi + loss_r
+
+        # (Optional) Use EMA to normalize losses to balance the effects of actor and reward estimator
+        # self._pi_loss_mean = (1 - self._beta) * self._pi_loss_mean + loss_pi.mean().item()
+        # self._reward_loss_mean = (1 - self._beta) * self._reward_loss_mean + loss_r.mean().item()
+        # loss_pi = loss_pi / (self._pi_loss_mean + 1e-6)
+        # loss_r = loss_r / (self._reward_loss_mean + 1e-6) * 0  # scale down to emphasize actor loss
+
+        # (Optional) Use DWA (Dynamic Weight Average) to balance 2 losses
+        # T = 0.5  # Temperature term
+        # K = 2.  # Sum of weights
+        # weights_pi_r = torch.Tensor([loss_pi.mean().item() / (self._last_loss_pi + 1e-6),
+        #                              loss_r.mean().item() / (self._last_loss_r + 1e-6)]) / T
+        # weights_pi_r = torch.nn.functional.softmax(weights_pi_r) * K
+
+        # loss = weights_pi_r[0] * loss_pi + weights_pi_r[1] * loss_r  # Dynamically weighted loss
+        loss = loss_pi + loss_r  # Update both actor and reward estimator
+        # loss = loss_pi  # Only update actor
+
+        # Update the latest losses
+        self._last_loss_pi = loss_pi.mean().item()
+        self._last_loss_r = loss_r.mean().item()
 
         if self._advantage_estimation_method == 'subm':
             self._logger.store({'Loss/Loss_reward_estimator': loss_r.mean().item()})
+            # self._logger.store({'Loss/Loss_policy_ratio': weights_pi_r[0]})
+            # self._logger.store({'Loss/Loss_reward_ratio': weights_pi_r[1]})
         else:
             self._logger.store({'Loss/Loss_reward_critic': loss_r.mean().item()})
-        self._logger.store({'Value/Adv': adv.mean().item()})
 
         # Zero the gradients
         self._actor_critic.gru_optimizer.zero_grad()
@@ -490,9 +654,10 @@ class FOCOPS_CACD(PolicyGradient):
         self._actor_critic.actor_optimizer.step()
         self._actor_critic.reward_critic_optimizer.step()
 
-    def _update_reward_function(
+    def _update_reward_estimator(
         self,
         obs: torch.Tensor,
+        act: torch.Tensor,
         rewards: torch.Tensor,
     ) -> None:
         r"""Update reward estimator network (excluding the shared gru part).
@@ -517,9 +682,9 @@ class FOCOPS_CACD(PolicyGradient):
         """
         self._actor_critic.reward_critic_optimizer.zero_grad()
 
-        pred_rewards = self._actor_critic.forward_reward(obs)[0]
+        pred_rewards = self._actor_critic.forward_reward(obs, act)[0]
 
-        loss = nn.functional.mse_loss(pred_rewards, rewards)
+        loss = nn.functional.mse_loss(pred_rewards.squeeze(), rewards.squeeze())
 
         if self._cfgs.algo_cfgs.use_critic_norm:
             for param in self._actor_critic.reward_critic.parameters():
@@ -578,10 +743,10 @@ class FOCOPS_CACD(PolicyGradient):
         distributed.avg_grads(self._actor_critic.reward_critic)
         self._actor_critic.reward_critic_optimizer.step()
 
-        self._logger.store({'Loss/Loss_reward_critic': loss.mean().item()})
+        self._logger.store({'Loss/Loss_reward_estimator': loss.mean().item()})
 
     def _update_cost_critic(self, obs: torch.Tensor, target_value_c: torch.Tensor) -> None:
-        r"""Update value network under a double for loop.
+        r"""Update cost estimator network.
 
         The loss function is ``MSE loss``, which is defined in ``torch.nn.MSELoss``.
         Specifically, the loss function is defined as:
@@ -604,9 +769,10 @@ class FOCOPS_CACD(PolicyGradient):
         self._actor_critic.cost_critic_optimizer.zero_grad()
 
         # value_c = self._actor_critic.cost_critic(obs)[0]
-        value_c = self._actor_critic.cost_critic(obs)[0].squeeze(0)
+        value_c = self._actor_critic.cost_critic(obs)[0]
 
-        loss = nn.functional.mse_loss(value_c, target_value_c)
+        loss = nn.functional.mse_loss(value_c.squeeze(), target_value_c.squeeze())  # MSE loss
+        # loss = nn.functional.l1_loss(value_c, target_value_c)  # L1 loss
 
         if self._cfgs.algo_cfgs.use_critic_norm:
             for param in self._actor_critic.cost_critic.parameters():
@@ -623,7 +789,7 @@ class FOCOPS_CACD(PolicyGradient):
 
         self._actor_critic.cost_critic_optimizer.step()
 
-        self._logger.store({'Loss/Loss_cost_critic': loss.mean().item()})
+        self._logger.store({'Loss/Loss_cost_estimator': loss.mean().item()})
 
     def _update_sdm(
         self,
@@ -648,14 +814,11 @@ class FOCOPS_CACD(PolicyGradient):
         delta = self._actor_critic.sdm(obs_act)
 
         # Calculate loss
-        loss = self._actor_critic.sdm.loss_l1(obs, act, delta, next_obs)
+        # loss = self._actor_critic.sdm.loss_l1(obs, act, delta, next_obs)
+        loss = self._actor_critic.sdm.loss_iou(obs, act, delta, next_obs)
 
         # Backpropagate
         self._actor_critic.sdm.backprop(loss)
 
         # Log sdm loss
         self._logger.store({'Loss/Loss_sdm': loss.mean().item()})
-
-
-
-
