@@ -20,15 +20,17 @@ from typing import Any
 
 import torch
 from rich.progress import track
+from gymnasium.spaces import Discrete, MultiBinary, MultiDiscrete
 
 from omnisafe.adapter.online_adapter import OnlineAdapter
+from omnisafe.adapter.onpolicy_adapter import OnPolicyAdapter
 from omnisafe.common.buffer import VectorOnPolicyBuffer, VectorOnPolicyCACDBuffer
 from omnisafe.common.logger import Logger
 from omnisafe.models.actor_critic.constraint_actor_critic_dynamics import ConstraintActorCriticDynamics
 from omnisafe.utils.config import Config
 
 
-class OnPolicyCACDAdapter(OnlineAdapter):
+class OnPolicyCACDAdapter(OnPolicyAdapter):
     """OnPolicy Adapter for OmniSafe.
 
     :class:`OnPolicyAdapter` is used to adapt the environment to the on-policy training.
@@ -58,12 +60,22 @@ class OnPolicyCACDAdapter(OnlineAdapter):
         self.gru_layer_num: int = cfgs.model_cfgs.num_gru_layers
         self.gru_latent_size: int = cfgs.model_cfgs.latent_size
 
-    def rollout(  # pylint: disable=too-many-locals
+        if isinstance(self.action_space, Discrete):
+            self.nominal_action = torch.tensor([[0]])  # CliffCircular
+        elif isinstance(self.action_space, MultiDiscrete):
+            self.nominal_action = torch.tensor([[1] * self.action_space.nvec.shape[0]])  # SRE
+        else:
+            print(f'Nominal action for {type(self.action_space)} is not supported.')
+            raise NotImplementedError
+        print(f'Nominal (no_op) action in this env: {self.nominal_action}')
+
+    def rollout_old(  # pylint: disable=too-many-locals
         self,
         steps_per_epoch: int,
         agent: ConstraintActorCriticDynamics,
         buffer: VectorOnPolicyCACDBuffer,
         logger: Logger,
+        enable_safety_layer: bool = False,
     ) -> None:
         """Rollout the environment and store the data in the buffer.
 
@@ -77,6 +89,7 @@ class OnPolicyCACDAdapter(OnlineAdapter):
             cost critic and semantic dynamics model.
             buffer (VectorOnPolicyBuffer): Vector on-policy buffer.
             logger (Logger): Logger, to log ``EpRet``, ``EpCost``, ``EpLen``.
+            enable_safety_layer (bool): Whether enable the sdm-based safety layer
         """
         self._reset_log()
 
@@ -88,7 +101,16 @@ class OnPolicyCACDAdapter(OnlineAdapter):
             description=f'Processing rollout for epoch: {logger.current_epoch}...',
         ):
             # Step CACD
-            act, logp, reward_pred, cost_value_pred, latent = agent.step(obs, latent)
+            # act, logp, reward_pred, cost_value_pred, latent = agent.step(obs, latent)  # cost value approximated
+            act, logp, act_overlaid, reward_pred, cost_pred, latent = agent.step(
+                obs,
+                latent,
+                deterministic=False,
+                enable_safety_layer=enable_safety_layer,
+            )  # immediate cost approximated
+
+            if act_overlaid.item() is True:
+                logger.store({'Train/ActionOverlaid': act_overlaid})
 
             # Step environment
             next_obs, reward, cost, terminated, truncated, info = self.step(act)
@@ -99,7 +121,8 @@ class OnPolicyCACDAdapter(OnlineAdapter):
             self._log_value(reward=reward, cost=cost, info=info)
 
             if self._cfgs.algo_cfgs.use_cost:
-                logger.store({'Value/cost': cost_value_pred})
+                # logger.store({'Value/cost': cost_value_pred})
+                logger.store({'Value/cost': cost_pred})
             logger.store({'Value/reward': reward_pred})
 
             buffer.store(
@@ -109,7 +132,8 @@ class OnPolicyCACDAdapter(OnlineAdapter):
                 cost=cost,
                 done=terminated or truncated,
                 reward_pred=reward_pred,
-                value_c=cost_value_pred,
+                cost_pred=cost_pred,
+                # value_c=cost_value_pred,
                 next_obs=next_obs,
                 logp=logp,
             )
@@ -120,23 +144,21 @@ class OnPolicyCACDAdapter(OnlineAdapter):
                 if epoch_end or done or time_out:
                     last_r = torch.zeros(1)
                     last_value_c = torch.zeros(1)
-                    # if not done:
-                        # if epoch_end:
-                        #     logger.log(
-                        #         f'Warning: trajectory cut off when rollout by epoch at {self._ep_len[idx]} steps.',
-                        #     )
-                        #     _, last_r, last_value_c, _ = agent.step(obs[idx])
-                        # if time_out:
-                        #     _, last_r, last_value_c, _ = agent.step(
-                        #         info['final_observation'][idx],
-                        #     )
-                        # last_r = last_r.unsqueeze(0)
-                        # last_value_c = last_value_c.unsqueeze(0)
+                    if not done:
+                        if epoch_end:
+                            logger.log(
+                                f'Warning: trajectory cut off when rollout by epoch at {self._ep_len[idx]} steps.',
+                            )
+                            _, _, _, last_r, last_value_c, _ = agent.step(obs, latent)
+
+                        if time_out:
+                            _, _, _, last_r, last_value_c, _ = agent.step(obs, latent)
 
                     if done or time_out:
                         obs, _ = self.reset()
 
                         self._log_metrics(logger, idx)
+                        # print(f'Episodic cost is {self._ep_cost[0]}.')
                         self._reset_log(idx)
 
                         self._ep_ret[idx] = 0.0
@@ -150,8 +172,126 @@ class OnPolicyCACDAdapter(OnlineAdapter):
                     logger.store({'Metrics/EpRetMax': buffer.buffers[0].max_ep_ret})
 
                     # Reset latent for next episode
-                    # latent = self._init_latent()
                     latent = None
+
+    def rollout(  # pylint: disable=too-many-locals
+        self,
+        steps_per_epoch: int,
+        agent: ConstraintActorCriticDynamics,
+        buffer: VectorOnPolicyCACDBuffer,
+        logger: Logger,
+        enable_safety_layer: bool = False,
+        safety_layer_use_reward: bool = False,
+    ) -> None:
+        """Rollout the environment and store the data in the buffer.
+        This version does not interrupt a trajectory that is not yet terminated or truncated.
+
+        .. warning::
+            As OmniSafe uses :class:`AutoReset` wrapper, the environment will be reset automatically,
+            so the final observation will be stored in ``info['final_observation']``.
+
+        Args:
+            steps_per_epoch (int): Number of steps per epoch.
+            agent (ConstraintActorCriticDynamics): Constraint actor-critic dynamics, including actor , reward critic,
+            cost critic and semantic dynamics model.
+            buffer (VectorOnPolicyBuffer): Vector on-policy buffer.
+            logger (Logger): Logger, to log ``EpRet``, ``EpCost``, ``EpLen``.
+            enable_safety_layer (bool): Whether enable the sdm-based safety layer.
+            safety_layer_use_reward (bool): Whether use reward-cost tradeoff score to select safe action
+        """
+        self._reset_log()
+
+        obs, _ = self.reset()
+        latent = None  # Last latent
+        last_action = self.nominal_action.clone()  # means no_op action
+        step: int = 0  # Number of steps taken by the agent
+
+        while True:
+            # Step CACD
+            # act, logp, reward_pred, cost_value_pred, latent = agent.step(obs, latent)  # cost value approximated
+            act, logp, act_overlaid, reward_pred, cost_pred, latent = agent.step(
+                obs=obs,
+                last_act=last_action,
+                lagrangian_multiplier=logger.get_stats('Metrics/LagrangeMultiplier')[0],
+                latent=latent,
+                deterministic=False,
+                enable_safety_layer=enable_safety_layer,
+                safety_layer_use_reward=safety_layer_use_reward,
+            )  # immediate cost approximated
+
+            if act_overlaid.item() is True:
+                logger.store({'Train/ActionOverlaid': act_overlaid.type(torch.float32)})
+
+            # Step environment
+            next_obs, reward, cost, terminated, truncated, info = self.step(act)
+            step += 1
+            last_action.copy_(act)
+
+            # print(f'{next_obs.shape=}')
+            # print(f'{step=} {act=} {reward=} {cost=} {terminated=} {truncated=}')
+
+            # Keep record of reward/cost statistics
+            self._log_value(reward=reward, cost=cost, info=info)
+
+            # Log estimated immediate rewards and costs
+            if self._cfgs.algo_cfgs.use_cost:
+                # logger.store({'Value/cost': cost_value_pred})
+                logger.store({'Value/cost': cost_pred})
+            logger.store({'Value/reward': reward_pred})
+
+            # Store info of this step (state-action-state transition)
+            buffer.store(
+                obs=obs,
+                act=act,
+                act_overlaid=act_overlaid,
+                reward=reward,
+                cost=cost,
+                done=terminated or truncated,
+                reward_pred=reward_pred,
+                cost_pred=cost_pred,
+                # value_c=cost_value_pred,
+                next_obs=next_obs,
+                logp=logp,
+            )
+
+            # Let the last episode finish naturally before concluding this epoch
+            epoch_end = False
+            for idx, (done, time_out) in enumerate(zip(terminated, truncated)):
+                if done or time_out:
+                    # print(f'Episode end.')
+                    # Judge epoch end
+                    if step >= steps_per_epoch:
+                        # print(f'Epoch End.')
+                        epoch_end = True
+
+                    # Log epoch statistics
+                    self._log_metrics(logger, idx)
+                    # Log mean and max episodic rewards from buffer
+                    logger.store({'Metrics/EpRetMean': buffer.buffers[0].mean_ep_ret})
+                    logger.store({'Metrics/EpRetMax': buffer.buffers[0].max_ep_ret})
+
+                    # Reset epoch statistics
+                    self._reset_log(idx)
+
+                    # Finish epoch by calculating advantages
+                    buffer.finish_path(idx=idx)
+
+                    # Log mean and max episodic rewards from buffer
+                    logger.store({'Metrics/EpRetMean': buffer.buffers[0].mean_ep_ret})
+                    logger.store({'Metrics/EpRetMax': buffer.buffers[0].max_ep_ret})
+
+                    # Reset obs and latent for next episode
+                    obs, _ = self.reset()
+                    latent = None
+                    last_action = self.nominal_action.clone()  # means no_op action
+                else:
+                    # While loop continues with the latest observation
+                    obs = next_obs
+
+            # Break out of the while loop
+            if epoch_end:
+                logger.log(f'Epoch is done with {step} steps.')
+                break
 
     def _log_value(
         self,
