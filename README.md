@@ -27,12 +27,11 @@ The semantic observation in Safe Riverine Environment is the patchified water ma
 
 The comparison of SDM with other vision dynamics models (e.g., Lagent Dynamics Model) is graphically shown below.
 
-![vdm-comp](images/vision_dynamics_models_pred_compressed.mp4)
 
-<video width="320" height="240" controls>
-  <source src="images/vision_dynamics_models_pred_compressed.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
+
+https://github.com/user-attachments/assets/7adbf89f-f6d9-44dd-98c3-eddb12354a35
+
+
 
 - CADE
 
