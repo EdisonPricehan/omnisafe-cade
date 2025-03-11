@@ -53,3 +53,30 @@ The computational graph of CADE shows the forward pass and backpropagation pass,
 ![cg](images/cade-computation-graph.png)
 
 
+## Installation
+
+A virtual python environment (e.g., miniconda) is recommended to create before installing dependencies of OmniSafe and CADE.
+
+```bash
+git clone git@github.com:EdisonPricehan/omnisafe-cade.git
+cd omnisafe-cade
+pip install -e .
+```
+
+
+## Usage
+All hyperparameters of CADE for both environments are stored in [FOCOPS_CACD.yaml](omnisafe/configs/on-policy/FOCOPS_CACD.yaml).
+
+To train CliffCircular-v1 environment, run
+```bash
+python examples/train_cliffcircular.py
+```
+
+To train SRE, run
+```bash
+python examples/train_riverine.py
+```
+
+wandb and tensorboard logging are enabled by default in the yaml file.
+
+
