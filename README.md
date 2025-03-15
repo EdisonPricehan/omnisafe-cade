@@ -77,6 +77,7 @@ The standardization of reward advantage and cost advantage is defined in [vector
 All vision dynamics models are defined in the [dynamics](omnisafe/models/dynamics) folder, including the proposed [SDM](omnisafe/models/dynamics/sdm.py), and other comparative models like [SDM-MLP](omnisafe/models/dynamics/sdm_mlp.py), [LDM](omnisafe/models/dynamics/ldm.py) and [LDM-MLP](omnisafe/models/dynamics/ldm_mlp.py).
 The dataset used to train and evaluate different models in SRE is in [riverine](omnisafe/datasets/riverine).
 The pre-trained VAE model for 4-channel (RGB+mask) image encoding used as input by latent dynamics models is [vae-4channel.pth](omnisafe/models/dynamics/vae-4channel.pth).
+The source code of VAE is in our another repo [Synergistic Reinforcement and Imitation Learning](https://github.com/lijianwen1997/Synergistic-Reinforcement-and-Imitation-Learning/tree/main/encoder).
 Note that SDM only uses the water mask. The patchfication method is implemented in [patchification.py](omnisafe/utils/patchification.py).
 
 ### Episode Dataset
