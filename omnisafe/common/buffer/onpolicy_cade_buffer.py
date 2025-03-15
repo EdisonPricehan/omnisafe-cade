@@ -25,7 +25,7 @@ from omnisafe.utils.math import discount_cumsum, SlidingWindowFilter, forward_di
 from omnisafe.utils.model import get_obs_dim
 
 
-class OnPolicyCACDBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attributes
+class OnPolicyCADEBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attributes
     """A buffer for storing trajectories experienced by an agent interacting with the environment.
 
     Besides, The buffer also provides the functionality of calculating the advantages of

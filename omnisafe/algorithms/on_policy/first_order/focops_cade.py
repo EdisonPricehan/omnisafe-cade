@@ -27,26 +27,27 @@ from rich.progress import track
 from typing import Any, Union, List
 from gymnasium.spaces import Discrete, MultiDiscrete
 
-from omnisafe.adapter.onpolicy_cacd_adapter import OnPolicyCACDAdapter
+from omnisafe.adapter.onpolicy_cade_adapter import OnPolicyCADEAdapter
 from omnisafe.algorithms import registry
 from omnisafe.algorithms.on_policy.base.policy_gradient import PolicyGradient
-from omnisafe.common.buffer import VectorOnPolicyCACDBuffer
+from omnisafe.common.buffer import VectorOnPolicyCADEBuffer
 from omnisafe.common.lagrange import Lagrange
 from omnisafe.common.mpc_lagrange import MPCLagrange
 from omnisafe.utils import distributed
 from omnisafe.typing import AdvatageEstimator
 from omnisafe.utils.episode_dataset import EpisodeDataset
 from omnisafe.models.actor_critic.constraint_actor_critic import ConstraintActorCritic
-from omnisafe.models.actor_critic.constraint_actor_critic_dynamics import ConstraintActorCriticDynamics
+from omnisafe.models.actor_critic.constraint_actor_dynamics_estimator import ConstraintActorDynamicsEstimator
 from omnisafe.models.actor.latent_multi_categorical_actor import LatentMultiCategoricalActor
 from omnisafe.utils.math import (get_dist_mean_std, get_multi_dist_mean_std, kld_multi_categorical,
                                  logits_from_multi_categorical)
 
 
 @registry.register
-class FOCOPS_CACD(PolicyGradient):
-    """The First Order Constrained Optimization in Policy Space (FOCOPS) algorithm.
-    Constrained-Actor-Critic-Dynamics structure.
+class FOCOPS_CADE(PolicyGradient):
+    """
+    Constrained Actor Dynamics Estimator structure, built on
+    the First Order Constrained Optimization in Policy Space (FOCOPS) algorithm.
 
     References:
         - Title: First Order Constrained Optimization in Policy Space
@@ -57,7 +58,7 @@ class FOCOPS_CACD(PolicyGradient):
     _p_dist: Union[Categorical, List[Categorical]]
 
     def _init_env(self) -> None:
-        self._env: OnPolicyCACDAdapter = OnPolicyCACDAdapter(
+        self._env: OnPolicyCADEAdapter = OnPolicyCADEAdapter(
             self._env_id,
             self._cfgs.train_cfgs.vector_env_nums,
             self._seed,
@@ -80,7 +81,7 @@ class FOCOPS_CACD(PolicyGradient):
         # Expand buffer size by 1 episode length
         size: int = self._steps_per_epoch + self._cfgs.train_cfgs.max_episode_steps
 
-        self._buf: VectorOnPolicyCACDBuffer = VectorOnPolicyCACDBuffer(
+        self._buf: VectorOnPolicyCADEBuffer = VectorOnPolicyCADEBuffer(
             obs_space=self._env.observation_space,
             act_space=self._env.action_space,
             # size=self._steps_per_epoch,
@@ -124,7 +125,7 @@ class FOCOPS_CACD(PolicyGradient):
         self._last_loss_r: float = 1.0
 
     def _init_model(self) -> None:
-        self._actor_critic: ConstraintActorCriticDynamics = ConstraintActorCriticDynamics(
+        self._actor_critic: ConstraintActorDynamicsEstimator = ConstraintActorDynamicsEstimator(
             obs_space=self._env.observation_space,
             act_space=self._env.action_space,
             model_cfgs=self._cfgs.model_cfgs,

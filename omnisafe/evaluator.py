@@ -39,7 +39,7 @@ from omnisafe.common import Normalizer
 from omnisafe.envs.core import CMDP, make
 from omnisafe.envs.wrapper import ActionRepeat, ActionScale, ObsNormalize, TimeLimit
 from omnisafe.models.actor import ActorBuilder
-from omnisafe.models.actor_critic import ConstraintActorCritic, ConstraintActorQCritic, ConstraintActorCriticDynamics
+from omnisafe.models.actor_critic import ConstraintActorCritic, ConstraintActorQCritic, ConstraintActorDynamicsEstimator
 from omnisafe.models.base import Actor
 from omnisafe.utils.config import Config
 
@@ -63,7 +63,7 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
         self,
         env: CMDP | None = None,
         actor: Actor | None = None,
-        actor_critic: ConstraintActorCritic | ConstraintActorQCritic | ConstraintActorCriticDynamics | None = None,
+        actor_critic: ConstraintActorCritic | ConstraintActorQCritic | ConstraintActorDynamicsEstimator | None = None,
         dynamics: EnsembleDynamicsModel | None = None,
         planner: CEMPlanner
         | ARCPlanner
@@ -77,7 +77,7 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
         """Initialize an instance of :class:`Evaluator`."""
         self._env: CMDP | None = env
         self._actor: Actor | None = actor
-        self._actor_critic: ConstraintActorCritic | ConstraintActorQCritic | ConstraintActorCriticDynamics | None = (
+        self._actor_critic: ConstraintActorCritic | ConstraintActorQCritic | ConstraintActorDynamicsEstimator | None = (
             actor_critic)
         self._dynamics: EnsembleDynamicsModel | None = dynamics
         self._planner = planner
@@ -152,8 +152,8 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
         action_space = self._env.action_space
 
         # Only construct CACD model
-        if hasattr(self._cfgs, 'algo') and self._cfgs['algo'] == 'FOCOPS_CACD':
-            self._actor_critic = ConstraintActorCriticDynamics(
+        if hasattr(self._cfgs, 'algo') and self._cfgs['algo'] == 'FOCOPS_CADE':
+            self._actor_critic = ConstraintActorDynamicsEstimator(
                 obs_space=observation_space,
                 act_space=action_space,
                 model_cfgs=self._cfgs.model_cfgs,
@@ -450,7 +450,7 @@ class Evaluator:  # pylint: disable=too-many-instance-attributes
                             deterministic=True,
                         )
                         act = act.squeeze(0)  # remove batch dim
-                    elif self._actor_critic is not None:  # FOCOPS_CACD
+                    elif self._actor_critic is not None:  # FOCOPS_CADE
                         obs = obs.unsqueeze(0)
 
                         # TODO switch by config

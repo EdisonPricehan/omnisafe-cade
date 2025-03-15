@@ -312,7 +312,7 @@ def __check_env_configs(configs: Config, env_type: str) -> None:
             'CPO',
             'PCPO',
             'FOCOPS',
-            'FOCOPS_CACD',
+            'FOCOPS_CADE',
         ], f'Currently, OmniSafe does not support {configs.algo} running on discrete environments!'
     if env_type == 'box':
         assert (

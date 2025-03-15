@@ -1,8 +1,9 @@
 from mlagents_envs.base_env import CameraPose
-from mlagents_envs.envs.unity_gym_env_v1 import DoneReason
+from mlagents_envs.envs.unity_gym_env import DoneReason
 from mlagents_envs.envs.env_utils import make_unity_env
 from mlagents_envs.side_channel.agent_reset_channel import AgentResetChannel
 from mlagents_envs import logging_util
+
 
 import omnisafe
 from omnisafe.algorithms.algo_wrapper import AlgoWrapper as Agent
@@ -22,15 +23,14 @@ from patchify import patchify, unpatchify
 import torch
 from torch import nn
 
-from encoder.vae import VAE
-from encoder.dataset import InputChannelConfig
-
-channel_config = InputChannelConfig.RGB_MASK  # Encode 4 channel (rgb+mask) observation
+# VAE-related
+# from encoder.vae import VAE
+# from encoder.dataset import InputChannelConfig
+# channel_config = InputChannelConfig.RGB_MASK  # Encode 4 channel (rgb+mask) observation
 latent_dim = 16  # 16 is proven to perform best among (1024, 512, 256, 128, 64, 32, 16, 8)
-hidden_dims = [32, 64, 128, 256, 512, 1024]  # channel sizes of CNN
-
-# Pre-trained VAE model
-vae_model_name = '/home/edison/Research/Mutual_Imitaion_Reinforcement_Learning/encoder/models/vae-sim-all-rgb_mask-16.pth'
+# hidden_dims = [32, 64, 128, 256, 512, 1024]  # channel sizes of CNN
+# # Pre-trained VAE model
+# vae_model_name = '/home/edison/Research/Mutual_Imitaion_Reinforcement_Learning/encoder/models/vae-sim-all-rgb_mask-16.pth'
 
 # Path to the compiled Unity environment
 # env_path = '/home/edison/Research/unity-saferl-envs/medium/riverine_medium_env.x86_64'

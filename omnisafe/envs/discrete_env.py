@@ -34,7 +34,8 @@ class DiscreteEnv(CMDP):
     This environment only served as an example to integrate discrete action and
     observation environment into OmniSafe. We support
     `CartPole-v1 <https://gymnasium.farama.org/environments/classic_control/cart_pole/>`_
-    and `Taxi-v3 <https://gymnasium.farama.org/environments/toy_text/taxi/>`_.
+    and `Taxi-v3 <https://gymnasium.farama.org/environments/toy_text/taxi/>`_
+    and `CliffCircular-v1 <https://github.com/EdisonPricehan/CliffCircular>` _.
     The former is ``Box`` observation space and ``Discrete`` action space, while
     the latter is ``Discrete`` observation and ``Discrete`` action space.
 

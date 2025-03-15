@@ -45,7 +45,7 @@ from omnisafe.algorithms.on_policy import (
     CPPOPID,
     CUP,
     FOCOPS,
-    FOCOPS_CACD,
+    FOCOPS_CADE,
     PCPO,
     PDO,
     PPO,

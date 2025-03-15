@@ -18,4 +18,4 @@ from omnisafe.models.actor_critic.actor_critic import ActorCritic
 from omnisafe.models.actor_critic.actor_q_critic import ActorQCritic
 from omnisafe.models.actor_critic.constraint_actor_critic import ConstraintActorCritic
 from omnisafe.models.actor_critic.constraint_actor_q_critic import ConstraintActorQCritic
-from omnisafe.models.actor_critic.constraint_actor_critic_dynamics import ConstraintActorCriticDynamics
+from omnisafe.models.actor_critic.constraint_actor_dynamics_estimator import ConstraintActorDynamicsEstimator

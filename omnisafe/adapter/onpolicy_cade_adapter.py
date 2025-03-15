@@ -24,13 +24,13 @@ from gymnasium.spaces import Discrete, MultiBinary, MultiDiscrete
 
 from omnisafe.adapter.online_adapter import OnlineAdapter
 from omnisafe.adapter.onpolicy_adapter import OnPolicyAdapter
-from omnisafe.common.buffer import VectorOnPolicyBuffer, VectorOnPolicyCACDBuffer
+from omnisafe.common.buffer import VectorOnPolicyBuffer, VectorOnPolicyCADEBuffer
 from omnisafe.common.logger import Logger
-from omnisafe.models.actor_critic.constraint_actor_critic_dynamics import ConstraintActorCriticDynamics
+from omnisafe.models.actor_critic.constraint_actor_dynamics_estimator import ConstraintActorDynamicsEstimator
 from omnisafe.utils.config import Config
 
 
-class OnPolicyCACDAdapter(OnPolicyAdapter):
+class OnPolicyCADEAdapter(OnPolicyAdapter):
     """OnPolicy Adapter for OmniSafe.
 
     :class:`OnPolicyAdapter` is used to adapt the environment to the on-policy training.
@@ -72,8 +72,8 @@ class OnPolicyCACDAdapter(OnPolicyAdapter):
     def rollout_old(  # pylint: disable=too-many-locals
         self,
         steps_per_epoch: int,
-        agent: ConstraintActorCriticDynamics,
-        buffer: VectorOnPolicyCACDBuffer,
+        agent: ConstraintActorDynamicsEstimator,
+        buffer: VectorOnPolicyCADEBuffer,
         logger: Logger,
         enable_safety_layer: bool = False,
     ) -> None:
@@ -85,8 +85,8 @@ class OnPolicyCACDAdapter(OnPolicyAdapter):
 
         Args:
             steps_per_epoch (int): Number of steps per epoch.
-            agent (ConstraintActorCriticDynamics): Constraint actor-critic dynamics, including actor , reward critic,
-            cost critic and semantic dynamics model.
+            agent (ConstraintActorDynamicsEstimator): Constraint Actor Dynamics Estimator, including actor, reward estimator,
+            cost estimator and semantic dynamics model.
             buffer (VectorOnPolicyBuffer): Vector on-policy buffer.
             logger (Logger): Logger, to log ``EpRet``, ``EpCost``, ``EpLen``.
             enable_safety_layer (bool): Whether enable the sdm-based safety layer
@@ -177,8 +177,8 @@ class OnPolicyCACDAdapter(OnPolicyAdapter):
     def rollout(  # pylint: disable=too-many-locals
         self,
         steps_per_epoch: int,
-        agent: ConstraintActorCriticDynamics,
-        buffer: VectorOnPolicyCACDBuffer,
+        agent: ConstraintActorDynamicsEstimator,
+        buffer: VectorOnPolicyCADEBuffer,
         logger: Logger,
         enable_safety_layer: bool = False,
         safety_layer_use_reward: bool = False,
@@ -192,8 +192,8 @@ class OnPolicyCACDAdapter(OnPolicyAdapter):
 
         Args:
             steps_per_epoch (int): Number of steps per epoch.
-            agent (ConstraintActorCriticDynamics): Constraint actor-critic dynamics, including actor , reward critic,
-            cost critic and semantic dynamics model.
+            agent (ConstraintActorDynamicsEstimator): Constraint Actor Dynamics Estimator, including actor, reward estimator,
+            cost estimator and semantic dynamics model.
             buffer (VectorOnPolicyBuffer): Vector on-policy buffer.
             logger (Logger): Logger, to log ``EpRet``, ``EpCost``, ``EpLen``.
             enable_safety_layer (bool): Whether enable the sdm-based safety layer.

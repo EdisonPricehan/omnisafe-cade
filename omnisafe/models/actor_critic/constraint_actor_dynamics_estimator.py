@@ -20,7 +20,7 @@ from typing import Optional, Union, List, Tuple
 from gymnasium.spaces import Discrete, MultiDiscrete
 
 
-class ConstraintActorCriticDynamics(nn.Module):
+class ConstraintActorDynamicsEstimator(nn.Module):
     """
     This module contains 4 networks:
     2 Non-Markovian parts:

@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import torch
 
-from omnisafe.common.buffer.onpolicy_cacd_buffer import OnPolicyCACDBuffer
+from omnisafe.common.buffer.onpolicy_cade_buffer import OnPolicyCADEBuffer
 from omnisafe.typing import DEVICE_CPU, AdvatageEstimator, OmnisafeSpace
 from omnisafe.utils import distributed
 
 
-class VectorOnPolicyCACDBuffer(OnPolicyCACDBuffer):
-    """Vectorized on-policy constraint-actor-critic-dynamics buffer.
+class VectorOnPolicyCADEBuffer(OnPolicyCADEBuffer):
+    """Vectorized on-policy Constraint Actor Dynamics Estimator (CADE) buffer.
 
     The vector-on-policy buffer is used to store the data from vector environments. The data is
     stored in a list of on-policy buffers, each of which corresponds to one environment.
@@ -81,8 +81,8 @@ class VectorOnPolicyCACDBuffer(OnPolicyCACDBuffer):
         if num_envs < 1:
             raise ValueError('num_envs must be greater than 0.')
 
-        self.buffers: list[OnPolicyCACDBuffer] = [
-            OnPolicyCACDBuffer(
+        self.buffers: list[OnPolicyCADEBuffer] = [
+            OnPolicyCADEBuffer(
                 obs_space=obs_space,
                 act_space=act_space,
                 size=size,
