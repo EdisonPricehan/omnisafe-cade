@@ -1,10 +1,10 @@
-# CADE: Constrained Actor Dynamics Estimator for Safe Reinforcement Learning
+# CADE: Constrained Actor Dynamics Estimator for Model-based Safe Reinforcement Learning
 
 
 ## Overview
-CADE is a **model-based Safe Reinforcement Learning (SafeRL)** framework designed to address vision-driven autonomous river following in challenging environments where GPS signals are unreliable.
+CADE is a **Model-based Safe Reinforcement Learning (SafeRL)** framework designed to address vision-driven autonomous river following in challenging environments where GPS signals are unreliable.
 This repository implements the **Marginal Gain Advantage Estimation (MGAE)** method, the **Semantic Dynamics Model (SDM)** for interpretable state prediction, and the **CADE** architecture, which integrates safety-aware model-based RL to solve **partially observable Constrained Submodular Markov Decision Processes (PO-CSMDPs)**.
-Such environments include [CliffCircular-v1](https://github.com/EdisonPricehan/CliffCircular) and [Safe Riverine Environment](https://github.com/EdisonPricehan/ml-agents-river), which are both PyPI packages.
+Such environments include [CliffCircular-v1](https://github.com/EdisonPricehan/CliffCircular) and [Safe Riverine Environment](https://github.com/EdisonPricehan/ml-agents-river), which can both be installed via PyPI packages ([cliffcircular](https://pypi.org/project/cliffcircular/), [safe-riverine-envs](https://pypi.org/project/safe-riverine-envs/)).
 The whole repo is developed on top of [OmniSafe](https://github.com/PKU-Alignment/omnisafe). Thanks to their contributions to SafeRL.
 
 ## Key Contributions
