@@ -52,6 +52,14 @@ The computational graph of CADE shows the forward pass and backpropagation pass,
 
 ![cg](images/cade-computation-graph.png)
 
+We evaluate a MGAE-trained (reward only) policy in the CliffCircular-v1 environment, visualizing the comparison of the predicted **next observation** from SDM, the predicted **immediate reward** from reward estimator, and the predicted **immediate cost** from cost estimator, with the corresponding ground truths.
+It can be observed that in this simple gridworld environment, these 3 components in CADE provide accurate enough predictions, facilitating planning methods that address either safety or tradeoff between task completion and safety.
+
+
+
+https://github.com/user-attachments/assets/fc8ca194-02b2-4bcf-9f3f-fe2a77935fc0
+
+
 
 ## Major Components
 The code of CADE is built on the original infrastructure of OmniSafe, but tries to separate components from existing SafeRL algorithms for easier maintenance, debugging and comparison.
