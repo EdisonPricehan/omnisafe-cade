@@ -37,12 +37,12 @@ https://github.com/user-attachments/assets/7adbf89f-f6d9-44dd-98c3-eddb12354a35
 
 CADE is built on top of the policy gradient method First Order Constrained Optimization in Policy Space ([FOCOPS](https://proceedings.neurips.cc/paper_files/paper/2020/hash/af5d5ef24881f3c3049a7b9bfe74d58b-Abstract.html)), which uses the Lagrangian multiplier to balance reward advantage and cost advantage in policy update, and integrates the KL divergence loss in the same policy loss.
 But the differences are:
-1. The actor and reward estimator share the same recurrent network (GRU).
-2. No critics, just a reward estimator and a cost estimator that estimates the immediate reward and immediate cost.
-3. The reward advantage is calculated by MGAE.
+1. No value critics, just a reward estimator and a cost estimator that learn the immediate reward and immediate cost respectively.
+2. The actor and reward estimator share the same recurrent network (GRU), and only policy (actor) loss will be backpropagated to update the recurrent part.
+3. The reward advantage is calculated by MGAE, instead of critic-based advantage estimator methods.
 4. The cost advantage is defined as the discounted cumulative sum of predicted costs (by SDM and actor) in a short horizon, then transformed by sigmoid function.
 5. The training goes episode by episode, instead of batch by batch.
-6. Safety can also be injected during inference phase by the **safety layer with cost planning**, which also uses SDM and actor for planning.
+6. Safety can also be injected during inference/deployment phase by the **safety layer with cost planning**, which also uses SDM and actor for planning.
 
 The diagram of CADE's 4 components is shown below.
 
