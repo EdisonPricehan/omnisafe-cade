@@ -33,16 +33,16 @@ https://github.com/user-attachments/assets/7adbf89f-f6d9-44dd-98c3-eddb12354a35
 
 
 
-- CADE
+- **CADE**
 
 CADE is built on top of the policy gradient method First Order Constrained Optimization in Policy Space ([FOCOPS](https://proceedings.neurips.cc/paper_files/paper/2020/hash/af5d5ef24881f3c3049a7b9bfe74d58b-Abstract.html)), which uses the Lagrangian multiplier to balance reward advantage and cost advantage in policy update, and integrates the KL divergence loss in the same policy loss.
 But the differences are:
-1. The actor and reward estimator share the same recurrent network (GRU).
-2. No critics, just a reward estimator and a cost estimator that estimates the immediate reward and immediate cost.
-3. The reward advantage is calculated by MGAE.
+1. No value critics, just a reward estimator and a cost estimator that learn the immediate reward and immediate cost respectively.
+2. The actor and reward estimator share the same recurrent network (GRU), and only policy (actor) loss will be backpropagated to update the recurrent part.
+3. The reward advantage is calculated by MGAE, instead of critic-based advantage estimator methods.
 4. The cost advantage is defined as the discounted cumulative sum of predicted costs (by SDM and actor) in a short horizon, then transformed by sigmoid function.
 5. The training goes episode by episode, instead of batch by batch.
-6. Safety can also be injected during inference phase by the **safety layer with cost planning**, which also uses SDM and actor for planning.
+6. Safety can also be injected during inference/deployment phase by the **safety layer with cost planning**, which also uses SDM and actor for planning.
 
 The diagram of CADE's 4 components is shown below.
 
@@ -51,6 +51,14 @@ The diagram of CADE's 4 components is shown below.
 The computational graph of CADE shows the forward pass and backpropagation pass, and the inputs and outputs of all components.
 
 ![cg](images/cade-computation-graph.png)
+
+We evaluate a MGAE-trained (reward only) policy in the CliffCircular-v1 environment, visualizing the comparison of the predicted **next observation** from SDM, the predicted **immediate reward** from reward estimator, and the predicted **immediate cost** from cost estimator, with the corresponding ground truths.
+It can be observed that in this simple gridworld environment, these 3 components in CADE provide accurate enough predictions, facilitating planning methods that address either safety or tradeoff between task completion and safety.
+
+
+
+https://github.com/user-attachments/assets/fc8ca194-02b2-4bcf-9f3f-fe2a77935fc0
+
 
 
 ## Major Components
