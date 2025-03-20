@@ -16,7 +16,7 @@ import omnisafe
 from omnisafe.envs.core import make, CMDP
 from omnisafe.utils.config import Config
 from omnisafe.typing import OmnisafeSpace
-from omnisafe.models.actor_critic import ConstraintActorCriticDynamics
+from omnisafe.models.actor_critic import ConstraintActorDynamicsEstimator
 
 from gymnasium.envs.toy_text.cliffcircular import CliffCircularEnv
 from omnisafe.envs.riverine_env import RiverineEnv
@@ -134,7 +134,7 @@ class EvalCADE:
             ) from error
         return Config.dict2config(kwargs)
 
-    def load_model(self) -> ConstraintActorCriticDynamics:
+    def load_model(self) -> ConstraintActorDynamicsEstimator:
         assert os.path.exists(self.model_dir), f'Model dir {self.model_dir} does not exist!'
 
         model_path: str = os.path.join(self.model_dir, 'torch_save', self.model_name)
@@ -142,20 +142,20 @@ class EvalCADE:
 
         model_params = torch.load(model_path, map_location='cpu')
 
-        cad: ConstraintActorCriticDynamics = ConstraintActorCriticDynamics(
+        cade: ConstraintActorDynamicsEstimator = ConstraintActorDynamicsEstimator(
             obs_space=self.obs_space,
             act_space=self.act_space,
             model_cfgs=self.cfgs.model_cfgs,
             epochs=1,  # Not used, for linear lr decay
         )
 
-        # for name, module in cad.named_modules():
+        # for name, module in cade.named_modules():
         #     print(f'{name=} {module=}')
         #     print('-'*40)
 
-        cad.load_state_dict(model_params['actor_critic'])
+        cade.load_state_dict(model_params['actor_critic'])
 
-        return cad
+        return cade
 
     def on_press(self, key):
         # Check if the spacebar is pressed
@@ -535,43 +535,6 @@ def get_cade_stat_all(
 
 if __name__ == '__main__':
     # Define model evaluation params
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-04-14-10-11'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-06-21-26-28'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-07-12-18-30'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-07-13-07-28'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-07-16-31-19'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-07-17-12-27'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-10-21-03-36'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-11-15-42-23'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-11-16-08-30'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-12-16-07-56'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-12-21-43-33'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-14-15-05-51'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-14-15-30-08'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-14-16-13-05'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-14-19-56-03'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-16-14-42-34'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-16-15-30-23'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-042-2025-02-17-16-46-14'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-17-17-17-58'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-17-20-41-30'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-17-21-00-59'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-17-21-35-44'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-18-13-14-00'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-18-15-21-04'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-18-20-16-15'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-18-21-30-06'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-18-15-59-58'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-19-13-04-10'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-002-2025-02-20-21-56-08'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-002-2025-02-21-14-04-26'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-002-2025-02-21-13-45-17'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-002-2025-02-21-14-52-15'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-002-2025-02-21-15-15-22'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-042-2025-02-21-22-09-16'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-100-2025-02-22-14-55-50'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-26-14-29-15'
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-005-2025-02-26-16-18-57'
     # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-005-2025-02-26-16-35-45'
 
     # Eval single model
@@ -595,7 +558,7 @@ if __name__ == '__main__':
     eval_episodes: int = 30  # Evaluation episodes number
     difficulty: int = 0  # [0, 2], different difficulty levels of env
     evaluate: bool = False  # Eval if True, read csv data and get stat if False
-    safety_layer_enabled: bool = True
+    safety_layer_enabled: bool = True  # Whether enable cost-planning safety layer in evaluation
     merge_across_envs: bool = True  # Get stats across all difficulty levels
 
     if env_id == 'CliffCircular-v1':

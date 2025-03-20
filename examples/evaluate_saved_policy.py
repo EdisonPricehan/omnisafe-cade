@@ -27,11 +27,7 @@ from gymnasium.envs.toy_text.cliffcircular import CliffCircularEnv
 # Just fill your experiment's log directory in here.
 # Such as: ~/omnisafe/examples/runs/PPOLag-{SafetyPointGoal1-v0}/seed-000-2023-03-07-20-25-48
 # LOG_DIR = './runs/PPO-{CliffCircular-v0}/seed-002-2024-02-18-14-36-59'
-# LOG_DIR = './runs/PETS-{CliffCircular-v0}/seed-000-2024-03-10-16-34-45'
-# LOG_DIR = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2024-08-26-16-29-20'
-# LOG_DIR = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2024-09-09-23-51-15'
-# LOG_DIR = './runs/FOCOPS-{CliffCircular-v1}/seed-000-2024-09-10-14-28-38'
-LOG_DIR = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2024-09-12-14-22-35'
+LOG_DIR = './runs/PETS-{CliffCircular-v0}/seed-000-2024-03-10-16-34-45'
 
 
 if __name__ == '__main__':
@@ -39,7 +35,8 @@ if __name__ == '__main__':
     scan_dir = os.scandir(os.path.join(LOG_DIR, 'torch_save'))
     for item in scan_dir:
         if item.is_file() and item.name.split('.')[-1] == 'pt':
-            if '600' not in item.name:
+            # if '800' not in item.name:
+            if '1500' not in item.name:
                 continue
             else:
                 print(f'Start evaluating {item.name} ...')
@@ -52,10 +49,12 @@ if __name__ == '__main__':
             evaluator.load_saved(
                 save_dir=LOG_DIR,
                 model_name=item.name,
+                render_mode='human',
+                # render_mode='rgb_array',
                 camera_name='track',
                 width=5,
                 height=5,
             )
             # evaluator.render(num_episodes=1)
-            evaluator.evaluate(num_episodes=20)
+            evaluator.evaluate(num_episodes=30)
     scan_dir.close()

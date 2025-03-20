@@ -1,5 +1,4 @@
-
-from gymnasium.envs.toy_text.cliffcircular import CliffCircularEnv
+from cliffcircular.cliffcircular import CliffCircularEnv
 import omnisafe
 
 
@@ -15,7 +14,7 @@ if __name__ == '__main__':
     # agent = omnisafe.Agent('CCEPETS', env_id)
     # agent = omnisafe.Agent('RCEPETS', env_id)
     # agent = omnisafe.Agent('FOCOPS', env_id)
-    agent = omnisafe.Agent('FOCOPS_CACD', env_id)
+    agent = omnisafe.Agent('FOCOPS_CADE', env_id)
     # agent = omnisafe.Agent('PETS', env_id)
     # agent = omnisafe.Agent('LOOP', env_id)
 
