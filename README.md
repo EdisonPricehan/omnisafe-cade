@@ -91,6 +91,7 @@ A virtual python environment (e.g., miniconda) is recommended to create before i
 ```bash
 git clone git@github.com:EdisonPricehan/omnisafe-cade.git
 cd omnisafe-cade
+git checkout cacd
 pip install -e .
 ```
 
