@@ -33,7 +33,7 @@ https://github.com/user-attachments/assets/7adbf89f-f6d9-44dd-98c3-eddb12354a35
 
 
 
-- CADE
+- **CADE**
 
 CADE is built on top of the policy gradient method First Order Constrained Optimization in Policy Space ([FOCOPS](https://proceedings.neurips.cc/paper_files/paper/2020/hash/af5d5ef24881f3c3049a7b9bfe74d58b-Abstract.html)), which uses the Lagrangian multiplier to balance reward advantage and cost advantage in policy update, and integrates the KL divergence loss in the same policy loss.
 But the differences are:
