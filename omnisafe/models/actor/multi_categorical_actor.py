@@ -68,7 +68,7 @@ class MultiCategoricalActor(Actor):
             weight_initialization_mode=weight_initialization_mode,
         )
 
-    def _distribution(self, obs: torch.Tensor) -> Categorical:
+    def _distribution(self, obs: torch.Tensor) -> List[Categorical]:
         """Get the distribution of the actor.
 
         .. warning::
@@ -111,7 +111,7 @@ class MultiCategoricalActor(Actor):
             action = torch.stack([dist.sample() for dist in self._current_dist_list], dim=-1)
         return action.view(-1, self._act_dim_exec)
 
-    def forward(self, obs: torch.Tensor) -> Distribution:
+    def forward(self, obs: torch.Tensor) -> List[Distribution]:
         """Forward method.
 
         Args:
@@ -141,3 +141,22 @@ class MultiCategoricalActor(Actor):
         return torch.stack(
             [dist.log_prob(action) for dist, action in zip(self._current_dist_list, torch.unbind(act, dim=-1))], dim=-1
         ).sum(dim=-1)
+
+    def log_prob_raw(self, act: torch.Tensor) -> torch.Tensor:
+        """Compute the raw (un-summed) log probability of the multi-discrete action given the current distribution.
+
+                .. warning::
+                    You must call :meth:`forward` or :meth:`predict` before calling this method.
+
+                Args:
+                    act (torch.Tensor): Action from :meth:`predict` or :meth:`forward` .
+
+                Returns:
+                    Log probabilities of the multi-discrete action.
+                """
+        assert self._after_inference, 'log_prob() should be called after predict() or forward()'
+        self._after_inference = False
+        return torch.stack(
+            [dist.log_prob(action) for dist, action in zip(self._current_dist_list, torch.unbind(act, dim=-1))], dim=-1
+        )
+
