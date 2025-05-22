@@ -111,8 +111,8 @@ class OnPolicyCADEBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
 
         # For reward critic
         self.data['adv_r'] = torch.zeros((size,), dtype=torch.float32, device=device)
-        # self.data['discounted_ret'] = torch.zeros((size,), dtype=torch.float32, device=device)
-        # self.data['value_r'] = torch.zeros((size,), dtype=torch.float32, device=device)
+        self.data['discounted_ret'] = torch.zeros((size,), dtype=torch.float32, device=device)
+        self.data['value_r'] = torch.zeros((size,), dtype=torch.float32, device=device)
         self.data['target_value_r'] = torch.zeros((size,), dtype=torch.float32, device=device)
         self.data['reward_pred'] = torch.zeros((size,), dtype=torch.float32, device=device)
 
@@ -174,7 +174,7 @@ class OnPolicyCADEBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
 
     def finish_path(
         self,
-        last_r: torch.Tensor | None = None,
+        last_value_r: torch.Tensor | None = None,
         last_value_c: torch.Tensor | None = None,
     ) -> None:
         """Finish the current path and calculate the advantages of state-action pairs.
@@ -189,28 +189,24 @@ class OnPolicyCADEBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
             #. Calculate the advantages of the cost.
 
         Args:
-            last_r (torch.Tensor, optional): The value of the last state of the current path.
+            last_value_r (torch.Tensor, optional): The value of the last state of the current path.
                 Defaults to torch.zeros(1).
             last_value_c (torch.Tensor, optional): The value of the last state of the current path.
                 Defaults to torch.zeros(1).
         """
-        # if last_r is None:
-        #     last_r = torch.zeros(1, device=self._device)
-        # if last_value_c is None:
-        #     last_value_c = torch.zeros(1, device=self._device)
+        if last_value_r is None:
+            last_value_r = torch.zeros(1, device=self._device)
+        if last_value_c is None:
+            last_value_c = torch.zeros(1, device=self._device)
 
         path_slice = slice(self.path_start_idx, self.ptr)
 
-        # last_r = last_r.to(self._device)
-        # last_value_c = last_value_c.to(self._device)
+        last_value_r = last_value_r.to(self._device)
+        last_value_c = last_value_c.to(self._device)
 
-        # Original value critic sequence that postpend the value of the last state
-        # rewards = torch.cat([self.data['reward'][path_slice], last_r])
-        # rewards_pred = torch.cat([self.data['reward_pred'][path_slice], last_r])
-        # # values_r = torch.cat([self.data['value_r'][path_slice], last_r])
-        # costs = torch.cat([self.data['cost'][path_slice], last_value_c])
-        # # values_c = torch.cat([self.data['value_c'][path_slice], last_value_c])
-        # costs_pred = torch.cat([self.data['cost_pred'][path_slice], last_value_c])
+        # Original value critic sequence that append the value of the last state
+        values_r = torch.cat([self.data['value_r'][path_slice], last_value_r])
+        # values_c = torch.cat([self.data['value_c'][path_slice], last_value_c])
 
         # New immediate reward/cost estimator method that does not need the value of the last state
         rewards = self.data['reward'][path_slice]
@@ -218,18 +214,15 @@ class OnPolicyCADEBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
         costs = self.data['cost'][path_slice]
         costs_pred = self.data['cost_pred'][path_slice]
 
-        # discountred_ret = discount_cumsum(rewards, self._gamma)[:-1]
-        # self.data['discounted_ret'][path_slice] = discountred_ret
+        discountred_ret = discount_cumsum(rewards, self._gamma)
+        self.data['discounted_ret'][path_slice] = discountred_ret
 
         rewards -= self._penalty_coefficient * costs
 
-        # Keep record of the maximum episode return for submodular advantage estimation
-        # print(f'{rewards.shape=}')
-
         # Return without discount
         ep_ret = torch.sum(rewards).item()
-        self.max_ep_ret = max(ep_ret, self.max_ep_ret)
-        self.mean_ep_ret = self.ep_ret_swf.mean(ep_ret)
+        self.max_ep_ret = max(ep_ret, self.max_ep_ret)  # Maximum episodic return
+        self.mean_ep_ret = self.ep_ret_swf.mean(ep_ret)  # Averaged episodic return in a sliding window
 
         # Discounted return
         # disc_ep_ret = forward_discount_cumsum(rewards, discount_factor=self._gamma_c)[-1].item()
@@ -248,8 +241,8 @@ class OnPolicyCADEBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
         else:
             # Calculate reward advantage state-wise
             adv_r, target_value_r = self._calculate_adv_and_value_targets(
-                rewards_pred,  # predicted reward values
-                rewards,  # actual rewards
+                values=values_r,  # predicted latent state values for reward
+                rewards=torch.cat([rewards, last_value_r]),  # actual rewards
                 lam=self._lam,
             )
 
@@ -310,11 +303,12 @@ class OnPolicyCADEBuffer(BaseBuffer):  # pylint: disable=too-many-instance-attri
             'act_overlaid': self.data['act_overlaid'][:self.ptr],
             'reward': self.data['reward'][:self.ptr],
             'reward_pred': self.data['reward_pred'][:self.ptr],
+            'value_r': self.data['value_r'][:self.ptr],
             'target_value_r': self.data['target_value_r'][:self.ptr],
             'done': self.data['done'][:self.ptr],
             'adv_r': self.data['adv_r'][:self.ptr],
             'logp': self.data['logp'][:self.ptr],
-            # 'discounted_ret': self.data['discounted_ret'],
+            'discounted_ret': self.data['discounted_ret'],
             'adv_c': self.data['adv_c'][:self.ptr],
             'target_value_c': self.data['target_value_c'][:self.ptr],
             'cost': self.data['cost'][:self.ptr],
