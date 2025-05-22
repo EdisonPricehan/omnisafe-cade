@@ -94,7 +94,8 @@ class DiscreteEnv(CMDP):
             self._action_space = self._env.single_action_space
             self._observation_space = self._env.single_observation_space  # type: ignore
         else:
-            self._env = gymnasium.make(id=env_id, render_mode=kwargs.get('render_mode'))  # type: ignore
+            # self._env = gymnasium.make(id=env_id, extra_cliff_num=1, render_mode=kwargs.get('render_mode'))  # type: ignore
+            self._env = gymnasium.make(id=env_id, **kwargs)
             # self._env = gymnasium.make(id=env_id, autoreset=True, render_mode='human')  # type: ignore
             self._action_space = self._env.action_space  # type: ignore
             # self._action_space = spaces.Box(-1, 1, (1,))
