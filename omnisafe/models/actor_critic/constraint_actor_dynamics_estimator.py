@@ -29,11 +29,13 @@ class ConstraintActorDynamicsEstimator(nn.Module):
     Cost critic network (MLP) that estimates the cost of an observation
     Semantic dynamics network (MLP) that estimates the next observation given current observation and action
     """
+
     def __init__(self,
                  obs_space: OmnisafeSpace,
                  act_space: OmnisafeSpace,
                  model_cfgs: ModelConfig,
                  epochs: int,
+                 is_value_critic: bool = False,
                  ):
         super().__init__()
 
@@ -43,6 +45,7 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         self.obs_dim = get_obs_dim(obs_space)
         self.act_dim = get_act_dim(act_space, execution_dim=True)
         self.model_cfgs: ModelConfig = model_cfgs
+        self.is_value_critic: bool = is_value_critic
 
         # Define shared GRU layer for actor and reward critic
         self.gru = nn.GRU(
@@ -80,14 +83,14 @@ class ConstraintActorDynamicsEstimator(nn.Module):
                     start_factor=1.0,
                     end_factor=0.0,
                     total_iters=epochs,
-                    verbose=True,
+                    # verbose=True,
                 )
             else:
                 self.actor_scheduler = ConstantLR(
                     self.actor_optimizer,
                     factor=1.0,
                     total_iters=epochs,
-                    verbose=True,
+                    # verbose=True,
                 )
 
         # Define reward critic head (immediate reward estimator)
@@ -96,6 +99,7 @@ class ConstraintActorDynamicsEstimator(nn.Module):
             act_space=act_space,
             hidden_sizes=model_cfgs.critic.hidden_sizes,
             latent_size=model_cfgs.latent_size,
+            pred_value=self.is_value_critic,  # whether reward estimator for MGAE becomes (latent) state value critic
             activation=model_cfgs.critic.activation,
             weight_initialization_mode=model_cfgs.weight_initialization_mode,
             num_critics=1,
@@ -347,7 +351,8 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         # Print overlay
         if action_overlay:
             print(self._print_obs(start_obs))
-            print(f'Action overlaid, orig act: {start_action}, safe act: {safe_action}, horizon lowest cost: {lowest_cost}.')
+            print(
+                f'Action overlaid, orig act: {start_action}, safe act: {safe_action}, horizon lowest cost: {lowest_cost}.')
             print('-' * 60)
 
         return safe_action, action_overlay
@@ -538,8 +543,10 @@ class ConstraintActorDynamicsEstimator(nn.Module):
             log_prob = self.actor.log_prob(action)
 
             # Step reward (value) estimator
-            # reward = self.reward_critic(gru_output)[0]  # assume single estimator
-            reward = self.reward_critic(gru_output, action)[0]  # latent+action as input
+            if self.is_value_critic:
+                reward = self.reward_critic(gru_output)[0]  # assume single estimator, reward is latent state value
+            else:
+                reward = self.reward_critic(gru_output, action)[0]  # latent+action as input
 
             # Step SDM
             obs_cur_act = torch.cat([obs, action], dim=-1)
@@ -561,7 +568,8 @@ class ConstraintActorDynamicsEstimator(nn.Module):
                         num_samples=self.model_cfgs.dynamics.traj_sampling_num,
                         trajectory_length=self.model_cfgs.dynamics.horizon,
                         horizon_cost_threshold=self.model_cfgs.dynamics.horizon_cost_threshold,
-                        lam_r=self.model_cfgs.dynamics.discount_factor,  # Use the same discount factor for both reward and cost
+                        lam_r=self.model_cfgs.dynamics.discount_factor,
+                        # Use the same discount factor for both reward and cost
                         lam_c=self.model_cfgs.dynamics.discount_factor,
                         lagrangian_multiplier=lagrangian_multiplier,
                     )
@@ -709,7 +717,10 @@ class ConstraintActorDynamicsEstimator(nn.Module):
 
         # Pass the concatenated GRU outputs to the reward estimator MLP
         # act = act.squeeze(0)  # Seq x Feature
-        reward_pred = self.reward_critic(gru_output, act)
+        if self.is_value_critic:
+            reward_pred = self.reward_critic(gru_output)
+        else:
+            reward_pred = self.reward_critic(gru_output, act)
 
         return reward_pred
 
@@ -727,8 +738,10 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         distribution: Union[Distribution, List[Distribution]] = self.actor(gru_output)
 
         # Pass the concatenated GRU outputs to the reward estimator MLP
-        # reward_pred = self.reward_critic(gru_output, act)
-        reward_pred = self.reward_critic(reward_features, act)  # Reward loss does not affect gru training
+        if self.is_value_critic:
+            reward_pred = self.reward_critic(gru_output)
+        else:
+            reward_pred = self.reward_critic(reward_features, act)  # Reward loss does not affect gru training
 
         return distribution, reward_pred
 
@@ -741,9 +754,19 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         delta = self.sdm(obs_act)
         return delta
 
-    def forward(self,
-                obs: torch.Tensor,
-                latent: torch.Tensor,
-                deterministic: bool = False,
-                ) -> tuple[torch.Tensor, ...]:
-        return self.step(obs, latent, deterministic)
+    def forward(
+        self,
+        obs: torch.Tensor,
+        last_act: torch.Tensor,
+        latent: torch.Tensor,
+        deterministic: bool = False,
+    ) -> tuple[torch.Tensor, ...]:
+        return self.step(
+            obs=obs,
+            last_act=last_act,
+            lagrangian_multiplier=0.,
+            latent=latent,
+            deterministic=deterministic,
+            enable_safety_layer=False,
+            safety_layer_use_reward=False,
+        )
