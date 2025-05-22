@@ -18,7 +18,7 @@ from omnisafe.utils.config import Config
 from omnisafe.typing import OmnisafeSpace
 from omnisafe.models.actor_critic import ConstraintActorDynamicsEstimator
 
-from gymnasium.envs.toy_text.cliffcircular import CliffCircularEnv
+from cliffcircular.cliffcircular import CliffCircularEnv
 from omnisafe.envs.riverine_env import RiverineEnv
 
 
@@ -63,7 +63,9 @@ class EvalCADE:
             stat_file_name: str = f'{self.end_id}_{self.cade_method}_safety{self.enable_safety_layer}_seed{seed}_difficulty{self.difficulty}.csv'
         else:
             stat_file_name: str = f'{self.end_id}_{self.cade_method}_seed{seed}_difficulty{self.difficulty}.csv'
-        self.stat_file_path: str = os.path.join(self.save_path, stat_file_name)
+
+        if save_path is not None:
+            self.stat_file_path: str = os.path.join(self.save_path, stat_file_name)
 
         # Init env
         env_kwarg: Dict[str, Any] = {
@@ -201,8 +203,8 @@ class EvalCADE:
 
                 # Step SDM and update cost_pred
                 next_obs_pred = self.cad.sdm.predict(torch.cat([obs, act], dim=-1), round_to_int=True)
-                with torch.no_grad():
-                    cost_pred = self.cad.cost_critic(next_obs_pred)[0]  # only use the first cost critic
+                # with torch.no_grad():
+                #     cost_pred = self.cad.cost_critic(next_obs_pred)[0]  # only use the first cost critic
 
                 # Step environment
                 # print(f'{act=}')
@@ -210,6 +212,8 @@ class EvalCADE:
                 last_action.copy_(act)
                 ep_rew += reward.item()
                 ep_cost += cost.item()
+
+                print(f'{reward_pred=} {reward=} {cost_pred=} {cost=}')
 
                 # print(f'Pred reward:   {reward_pred.item():.2f},   Pred cost:   {cost_pred.item():.2f} \n'
                 #       f'Actual reward: {reward.item():.2f},   Actual cost: {cost.item():.2f} \n')
@@ -535,17 +539,23 @@ def get_cade_stat_all(
 
 if __name__ == '__main__':
     # Define model evaluation params
-    # model_dir: str = './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-005-2025-02-26-16-35-45'
+    model_dir: str = './runs/FOCOPS_CACD-{medium}/seed-000-2025-03-01-13-10-24'
+    model_name: str = 'epoch-350.pt'
 
     # Eval single model
-    # # Init CAD evaluator
-    # cad_eval = EvalCAD(
+    # Init CAD evaluator
+    # cad_eval = EvalCADE(
+    #     env_id='medium',
     #     model_dir=model_dir,
     #     model_name=model_name,
-    #     eval_episodes=eval_episodes,
+    #     cade_method='mgae',
+    #     eval_episodes=1,
+    #     difficulty=0,
     #     disp=False,
     #     enable_safety_layer=False,
     #     safety_layer_use_reward=False,
+    #     prediction_horizon=3,
+    #     horizon_cost_threshold=0.3,
     # )
     #
     # # Start evaluation
