@@ -37,8 +37,13 @@ def make_video_from_images(image_dir, output_video, fps=30):
 
 
 if __name__ == '__main__':
-    image_directory = 'models_pred'
-    output_video_path = "models_pred_video.mp4"
+    # Wildcat image dir
+    image_directory = '/home/edison/Research/omnisafe_zjy/examples/evaluations/riverine/video_inference/eval_figs_wildcat'
+    output_video_path = '/home/edison/Research/omnisafe_zjy/examples/evaluations/riverine/video_inference/models_eval_video_wildcat.mp4'
+
+    # Wabash image dir
+    # image_directory = '/home/edison/Research/omnisafe_zjy/examples/evaluations/riverine/video_inference/eval_figs_wabash'
+    # output_video_path = '/home/edison/Research/omnisafe_zjy/examples/evaluations/riverine/video_inference/models_eval_video_wabash.mp4'
 
     print(f'Starting generating video ...')
 
