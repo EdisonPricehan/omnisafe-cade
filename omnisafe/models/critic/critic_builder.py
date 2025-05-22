@@ -54,6 +54,7 @@ class CriticBuilder:
         act_space: OmnisafeSpace,
         hidden_sizes: list[int],
         latent_size: int = 128,  # only for r critic
+        pred_value: bool = False,  # for r critic with recurrent layers
         activation: Activation = 'relu',
         weight_initialization_mode: InitFunction = 'kaiming_uniform',
         num_critics: int = 1,
@@ -66,6 +67,7 @@ class CriticBuilder:
         self._activation: Activation = activation
         self._latent_size: int = latent_size
         self._hidden_sizes: list[int] = hidden_sizes
+        self._pred_value: bool = pred_value
         self._num_critics: int = num_critics
         self._use_obs_encoder: bool = use_obs_encoder
 
@@ -112,6 +114,7 @@ class CriticBuilder:
                 act_space=self._act_space,
                 latent_size=self._latent_size,
                 hidden_sizes=self._hidden_sizes,
+                pred_value=self._pred_value,
                 activation=self._activation,
                 weight_initialization_mode=self._weight_initialization_mode,
                 num_critics=self._num_critics,
