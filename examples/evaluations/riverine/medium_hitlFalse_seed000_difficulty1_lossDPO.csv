@@ -1,6 +1,2 @@
-Episodic Rewards,Episodic Costs
-2.0,0.5
-70.0,1.0
-35.0,1.0
-69.0,1.0
-40.0,1.0
+Episodic Rewards,Episodic Costs,Episodic Steps
+1.0,0.5,6
