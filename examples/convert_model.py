@@ -84,6 +84,7 @@ def pth2onnx(pth_path: str, onnx_name: str = 'model.onnx') -> None:
 
     # Load wrapped pth model
     model = load_model_wrapper(model_path=pth_path)
+    model.eval()
 
     # Get dummy inputs
     dummy_obs, dummy_reset = dummy_input()
@@ -139,9 +140,19 @@ if __name__ == '__main__':
     # Load cfg
     cfgs = load_cfgs(cfg_path=cade_cfg_path)
 
+    # Test torch model
+    cade_wrapper = load_model_wrapper(model_path=cade_pth_path)
+    cade_wrapper.eval()
+    for i in range(100):
+        obs = torch.randint(0, 2, (1, 256), dtype=torch.float32)
+        reset = torch.tensor([[0]], dtype=torch.bool)
+        action = cade_wrapper(obs, reset)
+        print(f'{action=}')
+    print(f'Random inference of pth policy is finished.')
+
     # Convert to onnx
-    pth2onnx(pth_path=cade_pth_path, onnx_name=cade_onnx_name)
-    print(f'Conversion finished.')
+    # pth2onnx(pth_path=cade_pth_path, onnx_name=cade_onnx_name)
+    # print(f'Conversion finished.')
 
     # Validate exported onnx model
     # onnx_path = os.path.join(cade_dir, 'torch_save', cade_onnx_name)
