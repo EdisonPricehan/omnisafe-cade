@@ -130,6 +130,7 @@ class FOCOPS_CADE(PolicyGradient):
             act_space=self._env.action_space,
             model_cfgs=self._cfgs.model_cfgs,
             epochs=self._cfgs.train_cfgs.epochs,
+            is_value_critic=('subm' not in self._cfgs.algo_cfgs.adv_estimation_method),  # estimate state value for non-MonteCarlo methods
         ).to(self._device)
 
         if distributed.world_size() > 1:
@@ -489,7 +490,7 @@ class FOCOPS_CADE(PolicyGradient):
                         self._update_reward_estimator(obs, act, reward)
                     else:
                         target_value_r = self._view2d(target_value_r, squeeze=True)
-                        self._update_reward_critic(obs, target_value_r)
+                        self._update_reward_critic(obs, act, target_value_r)
                 else:  # Update actor and (immediate) reward estimator
                     if isinstance(self._actor_critic.actor, LatentMultiCategoricalActor):
                         self._p_dist = [Categorical(logits=split) for split in
@@ -592,7 +593,7 @@ class FOCOPS_CADE(PolicyGradient):
         adv = self._compute_adv_surrogate(adv_r, adv_c)
         # loss_pi = self._loss_pi(distribution, act, logp, adv)  # original version
         loss_pi = self._loss_pi_safe(distribution, act, act_overlaid, logp, adv)  # safe version
-        loss_r = self._loss_reward(reward, reward_pred[0])  # either for reward function or critic
+        loss_r = self._loss_reward(reward, reward_pred[0])  # either for reward estimator or reward value critic
 
         # (Optional) Use EMA to normalize losses to balance the effects of actor and reward estimator
         # self._pi_loss_mean = (1 - self._beta) * self._pi_loss_mean + loss_pi.mean().item()
@@ -705,7 +706,12 @@ class FOCOPS_CADE(PolicyGradient):
 
         self._logger.store({'Loss/Loss_reward_estimator': loss.mean().item()})
 
-    def _update_reward_critic(self, obs: torch.Tensor, target_value_r: torch.Tensor) -> None:
+    def _update_reward_critic(
+        self,
+        obs: torch.Tensor,
+        act: torch.Tensor,
+        target_value_r: torch.Tensor
+    ) -> None:
         r"""Update value network under a double for loop.
 
         The loss function is ``MSE loss``, which is defined in ``torch.nn.MSELoss``.
@@ -724,11 +730,12 @@ class FOCOPS_CADE(PolicyGradient):
 
         Args:
             obs (torch.Tensor): The ``observation`` sampled from buffer.
+            act (torch.Tensor): The
             target_value_r (torch.Tensor): The ``target_value_r`` sampled from buffer.
         """
         self._actor_critic.reward_critic_optimizer.zero_grad()
 
-        loss = nn.functional.mse_loss(self._actor_critic.forward_reward(obs)[0], target_value_r)
+        loss = nn.functional.mse_loss(self._actor_critic.forward_reward(obs, act)[0], target_value_r)
 
         if self._cfgs.algo_cfgs.use_critic_norm:
             for param in self._actor_critic.reward_critic.parameters():
