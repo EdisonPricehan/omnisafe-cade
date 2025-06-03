@@ -55,10 +55,16 @@ The computational graph of CADE shows the forward pass and backpropagation pass,
 We evaluate a MGAE-trained (reward only) policy in the CliffCircular-v1 environment, visualizing the comparison of the predicted **next observation** from SDM, the predicted **immediate reward** from reward estimator, and the predicted **immediate cost** from cost estimator, with the corresponding ground truths.
 It can be observed that in this simple gridworld environment, these 3 components in CADE provide accurate enough predictions, facilitating planning methods that address either safety or tradeoff between task completion and safety.
 
-
-
 https://github.com/user-attachments/assets/fc8ca194-02b2-4bcf-9f3f-fe2a77935fc0
 
+We also evaluated trained MGAE, MGAE+Lagrangian and MGAE+SafetyLayer policies on the real-world videos (collected by manually flying UAV over the Wabash River and Wildcat Creek) in an open-loop fashion. The results show that MGAE+SafetyLayer stands to be the intermediate policy between the most aggressive MGAE and the most conservative MGAE+Lagrangian, which learns the best tradeoff between navigation performance and safety.
+
+
+
+https://github.com/user-attachments/assets/b524f5cb-0669-4188-87bf-18e7f79a0b4c
+
+
+https://github.com/user-attachments/assets/97b9dbf1-51e6-4f6d-9f81-6bd0f87f2bea
 
 
 ## Major Components

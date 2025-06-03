@@ -271,9 +271,11 @@ class HITLCADE:
                     obs = obs.unsqueeze(0)
                 elif obs.dim() == 3:
                     obs = obs.squeeze(0)
-                # print(f'{obs.shape=}')
 
-                # Step CAD
+                # Step CADE
+                # print(f'{obs.shape=} {last_action.shape=}')
+                # print(f'Latent shape: {latent.shape if latent is not None else "None"}')
+                # obs.shape=torch.Size([1, 256]), last_action.shape=torch.Size([1, 4]), latent.shape=torch.Size([1, 64])
                 agent_act, logp, act_overlaid, reward_pred, cost_pred, latent = self.cade.step(
                     obs=obs,
                     last_act=last_action,

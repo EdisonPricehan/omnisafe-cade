@@ -65,7 +65,7 @@ class Config(dict):
         gamma (float): Discount factor.
         lam (float): Lambda.
         lam_c (float): Lambda for cost.
-        adv_eastimator (AdvatageEstimator): Advantage estimator.
+        adv_estimator (AdvantageEstimator): Advantage estimator.
         standardized_rew_adv (bool): Whether to use standardized reward advantage.
         standardized_cost_adv (bool): Whether to use standardized cost advantage.
         env_cfgs (Config): Environment config.
@@ -116,7 +116,7 @@ class Config(dict):
     gamma: float
     lam: float
     lam_c: float
-    adv_eastimator: AdvatageEstimator
+    adv_estimator: AdvatageEstimator
     standardized_rew_adv: bool
     standardized_cost_adv: bool
     env_cfgs: Config

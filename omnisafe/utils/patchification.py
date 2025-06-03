@@ -1,3 +1,4 @@
+import os
 from typing import Union
 import numpy as np
 from patchify import patchify, unpatchify
@@ -159,3 +160,21 @@ def inflate_patch_mask(
     return inflated_mask_2d
 
 
+if __name__ == '__main__':
+    import cv2
+
+    mask_dir: str = '/home/edison/Research/omnisafe_zjy/examples/evaluations/riverine/video_inference/masks'
+
+    for item in os.scandir(mask_dir):
+        mask = cv2.imread(item.path)
+        cv2.imshow('Mask', mask)
+
+        mask_patch = get_patchified_mask(
+            mask=mask,
+            is_uint8=True,
+            patch_size_x=8,
+            patch_size_y=8,
+            patch_step=8,
+            binary_threshold=0.5,
+            patch_threshold=0.5
+        )

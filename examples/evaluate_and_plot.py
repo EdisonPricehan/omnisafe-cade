@@ -1,20 +1,26 @@
 import os
 import csv
 import glob
-
+import json
+import time
 import numpy as np
 import pandas as pd
-from typing import Union, Optional, List, Dict, Tuple
+import torch
+from typing import Union, Optional, List, Dict, Tuple, Any
 import matplotlib.pyplot as plt
 import seaborn as sns
+from gymnasium.spaces import Discrete, MultiDiscrete
 
 import omnisafe
-
-from gymnasium.envs.toy_text.cliffcircular import CliffCircularEnv
+from omnisafe.utils.config import Config
+from omnisafe.envs.core import make, CMDP
+from omnisafe.typing import OmnisafeSpace
+from omnisafe.models.actor_critic import ConstraintActorDynamicsEstimator
+from cliffcircular.cliffcircular import CliffCircularEnv
 from omnisafe.envs.riverine_env import RiverineEnv
 
 
-def evaluate_model(
+def evaluate_model_recurrent(
     log_dir: str,
     render_mode: str,
     difficulty: int,
@@ -22,44 +28,170 @@ def evaluate_model(
     eval_episodes: int = 30,
     enable_safety_layer: bool = False,
 ):
-    evaluator = omnisafe.Evaluator(render_mode='rgb_array')
-    scan_dir = os.scandir(os.path.join(log_dir, 'torch_save'))
-    for item in scan_dir:
-        if item.is_file() and item.name.split('.')[-1] == 'pt':
-            # ckpt_number: str = '800' if env_name == 'cliffcircular' else '400'
-            ckpt_number: str = '1500' if env_name == 'cliffcircular' else '400'
+    # Load config
+    cfg_path = os.path.join(log_dir, 'config.json')
+    try:
+        with open(cfg_path, encoding='utf-8') as file:
+            kwargs = json.load(file)
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            f'The config file is not found in the save directory {log_dir}.',
+        ) from error
+    cfgs = Config.dict2config(kwargs)
+    print('Config is loaded.')
 
-            if ckpt_number not in item.name:
-                continue
-            else:
-                print(f'Start evaluating {item.name} ...')
+    # Init environment
+    env_id: str = log_dir[log_dir.find('{') + 1: log_dir.find('}')]
+    print(f'{env_id=}')
+    env_kwarg: Dict[str, Any] = {
+        'env_id': env_id,
+        'render_mode': render_mode,
+    }
 
-            evaluator.load_saved(
-                save_dir=log_dir,
-                model_name=item.name,
-                render_mode=render_mode,
-                camera_name='track',
-                width=5,
-                height=5,
-                difficulty=difficulty,
-                enable_safety_layer=enable_safety_layer,
-            )
+    assert 0 <= difficulty <= 2
 
-            # evaluator.render(num_episodes=1)
-            episodic_rewards, episodic_costs, episode_lengths = evaluator.evaluate(num_episodes=eval_episodes)
+    if 'cliff' in env_id.lower():  # cliffcircular env
+        env_kwarg['extra_cliff_num'] = difficulty
+    else:  # riverine env
+        if difficulty == 0:
+            env_kwarg['env_id'] = 'easy'
+        elif difficulty == 1:
+            env_kwarg['env_id'] = 'medium'
+        elif difficulty == 2:
+            env_kwarg['env_id'] = 'hard'
 
-            if save_path is not None:
-                with open(save_path, 'w', newline="") as file:
-                    writer = csv.writer(file)
+    env: CMDP = make(**env_kwarg)
+    obs_space: OmnisafeSpace = env.observation_space
+    act_space: OmnisafeSpace = env.action_space
+    print(f'Env is inited.')
 
-                    # Write the header
-                    writer.writerow(["Episodic Rewards", "Episodic Costs", "Episode Lengths"])
+    # Load model
+    assert os.path.exists(log_dir), f'Model dir {log_dir} does not exist!'
 
-                    # Write the data row by row
-                    for reward, cost, length in zip(episodic_rewards, episodic_costs, episode_lengths):
-                        writer.writerow([reward, cost, length])
+    model_name: str = 'epoch-1500.pt' if 'CliffCircular' in env_id else 'epoch-350.pt'
 
-    scan_dir.close()
+    model_path: str = os.path.join(log_dir, 'torch_save', model_name)
+    if not os.path.exists(model_path):  # Deal with corner case
+        model_name = 'epoch-800.pt'
+        model_path = os.path.join(log_dir, 'torch_save', model_name)
+
+    print(f'{model_name=}')
+    assert os.path.exists(model_path), f'Model path {model_path} does not exist!'
+
+    model_params = torch.load(model_path, map_location='cpu')
+
+    is_value_critic: bool = True  # TODO this depends on reward advantage type
+    cade: ConstraintActorDynamicsEstimator = ConstraintActorDynamicsEstimator(
+        obs_space=obs_space,
+        act_space=act_space,
+        model_cfgs=cfgs.model_cfgs,
+        epochs=1,  # Not used, for linear lr decay
+        is_value_critic=is_value_critic,
+    )
+
+    # for name, module in cade.named_modules():
+    #     print(f'{name=} {module=}')
+    #     print('-'*40)
+
+    cade.load_state_dict(model_params['actor_critic'])
+    print('Model is loaded.')
+
+    # Set nominal (default) action
+    if isinstance(act_space, Discrete):
+        nominal_action = torch.tensor([[0]])  # CliffCircular
+    elif isinstance(act_space, MultiDiscrete):
+        nominal_action = torch.tensor([[1] * act_space.nvec.shape[0]])  # SRE
+    else:
+        print(f'Nominal action for {type(act_space)} is not supported.')
+        raise NotImplementedError
+    print(f'Nominal (no_op) action in this env: {nominal_action}')
+
+    # Start evaluation
+    print('Start evaluation ...')
+    obs, info = env.reset()
+
+    latent = None
+    cur_episodes: int = 0
+    cur_steps: int = 0
+    ep_rew_list: List[float] = []
+    ep_cost_list: List[float] = []
+    ep_steps_list: List[int] = []
+    ep_rew: float = 0.
+    ep_cost: float = 0.
+    last_action = nominal_action.clone()
+
+    while cur_episodes < eval_episodes:
+
+        # Reshape obs
+        if obs.dim() == 1:
+            obs = obs.unsqueeze(0)
+        elif obs.dim() == 3:
+            obs = obs.squeeze(0)
+        # print(f'{obs.shape=}')
+
+        # Step CAD
+        act, logp, act_overlaid, reward_pred, cost_pred, latent = cade.step(
+            obs=obs,
+            last_act=last_action,
+            lagrangian_multiplier=1.0,  # equally weigh reward and cost
+            latent=latent,
+            deterministic=False,
+            enable_safety_layer=enable_safety_layer,
+            safety_layer_use_reward=False,
+        )
+
+        # Step SDM and update cost_pred
+        next_obs_pred = cade.sdm.predict(torch.cat([obs, act], dim=-1), round_to_int=True)
+        with torch.no_grad():
+            cost_pred = cade.cost_critic(next_obs_pred)[0]  # only use the first cost critic
+
+        # Step environment
+        # print(f'{act=}')
+        next_obs, reward, cost, terminated, truncated, info = env.step(act[0])
+        last_action.copy_(act)
+        ep_rew += reward.item()
+        ep_cost += cost.item()
+        cur_steps += 1
+
+        # print(f'Pred reward:   {reward_pred.item():.2f},   Pred cost:   {cost_pred.item():.2f} \n'
+        #       f'Actual reward: {reward.item():.2f},   Actual cost: {cost.item():.2f} \n')
+
+        obs = next_obs
+        if terminated or truncated:
+            obs, info = env.reset()
+            latent = None
+            last_action.copy_(nominal_action)
+            cur_episodes += 1
+
+            print(f'Episode {cur_episodes} finished with reward {ep_rew:.2f} and cost {ep_cost:.2f}, {cur_steps} steps.')
+
+            ep_rew_list.append(ep_rew)
+            ep_cost_list.append(ep_cost)
+            ep_steps_list.append(cur_steps)
+            ep_rew = 0.
+            ep_cost = 0.
+            cur_steps = 0
+
+    # Save to file
+    if save_path is not None:
+        with open(save_path, 'w', newline="") as file:
+            writer = csv.writer(file)
+
+            # Write the header
+            writer.writerow(["Episodic Rewards", "Episodic Costs", "Episode Lengths"])
+
+            # Write the data row by row
+            for reward, cost, length in zip(ep_rew_list, ep_cost_list, ep_steps_list):
+                writer.writerow([reward, cost, length])
+
+    # mean_ep_reward: float = ep_reward_sum / cur_episodes
+    # mean_ep_cost: float = ep_cost_sum / cur_episodes
+    # print(f'{cur_episodes} episodes finished, mean ep reward: {mean_ep_reward:.2f}, mean ep cost: {mean_ep_cost:.2f}')
+
+    env.close()
+    time.sleep(1)
+
+    return ep_rew_list, ep_cost_list, ep_steps_list
 
 
 def read_csv_files(file_pattern: str) -> Tuple[List[List[float]], List[str]]:
@@ -196,7 +328,7 @@ def violin_plot(
 
 
 if __name__ == '__main__':
-    env_name: str = 'cliffcircular'  # ['cliffcircular', 'riverine']
+    env_name: str = 'riverine'  # ['cliffcircular', 'riverine']
 
     # Advantage name to the trained model dir
     if env_name == 'cliffcircular':
@@ -206,6 +338,7 @@ if __name__ == '__main__':
             'gae-rtg': './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2024-10-23-22-07-04',
             'vtrace': './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2024-10-23-22-20-05',
             'subm': './runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2024-10-23-21-40-27',
+            'REINFORCE': './runs/FOCOPS_CADE-{CliffCircular-v1}/seed-000-2025-05-09-21-58-48',
         }
         cade_dir_dict: Dict[str, List[str]] = {
             'mgae': ['./runs/FOCOPS_CACD-{CliffCircular-v1}/seed-000-2025-02-28-09-19-56',
@@ -225,17 +358,19 @@ if __name__ == '__main__':
             'gae-rtg': './runs/FOCOPS_CACD-{medium}/seed-000-2024-11-03-12-38-53',
             'vtrace': './runs/FOCOPS_CACD-{medium}/seed-000-2024-11-01-23-38-10',
             'subm': './runs/FOCOPS_CACD-{medium}/seed-000-2024-10-31-16-12-21',
+            'REINFORCE': './runs/FOCOPS_CADE-{medium}/seed-000-2025-05-10-14-04-28',
         }
 
     render_mode: str = 'rgb_array'  # ['rgb_array', 'human']
     # render_mode: str = 'human'  # ['rgb_array', 'human']
-    difficulty: int = 1  # [0, 1, 2]
-    eval_episodes: int = 30
-    eval_dir: str = f'evaluations/{env_name}'
+    difficulty: int = 0  # [0, 1, 2]
+    eval_episodes: int = 1
+    # eval_dir: str = f'evaluations/{env_name}'
+    eval_dir: str = f'evaluations/{env_name}/rew_adv_comp'
 
     evaluate: bool = True  # Testing the trained models if True, plot the result otherwise
-    evaluate_cade: bool = True  # Evaluate CADE if True, otherwise evaluate advantage
-    enable_safety_layer: bool = True
+    evaluate_cade: bool = False  # Evaluate CADE if True, otherwise evaluate advantage
+    enable_safety_layer: bool = False
 
     if evaluate:
         if evaluate_cade:
@@ -246,7 +381,7 @@ if __name__ == '__main__':
                     save_path: Optional[str] = os.path.join(eval_dir, results_filename)
 
                     print(f'Evaluating {cade} on difficulty level {difficulty} in {env_name} env ...')
-                    evaluate_model(
+                    evaluate_model_recurrent(
                         log_dir=log_dir,
                         render_mode=render_mode,
                         difficulty=difficulty,
@@ -260,13 +395,15 @@ if __name__ == '__main__':
                 save_path: Optional[str] = os.path.join(eval_dir, results_filename)
 
                 print(f'Evaluating {adv} on difficulty level {difficulty} in {env_name} env ...')
-                evaluate_model(
+                evaluate_model_recurrent(
                     log_dir=log_dir,
                     render_mode=render_mode,
                     difficulty=difficulty,
                     save_path=save_path,
                     eval_episodes=eval_episodes,
+                    enable_safety_layer=enable_safety_layer,
                 )
+                exit(0)
 
         print(f'All evaluations are finished.')
 

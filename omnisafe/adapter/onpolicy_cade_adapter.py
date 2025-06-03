@@ -105,6 +105,7 @@ class OnPolicyCADEAdapter(OnPolicyAdapter):
             act, logp, act_overlaid, reward_pred, cost_pred, latent = agent.step(
                 obs,
                 latent,
+                lagrangian_multiplier=1.0,  # not used
                 deterministic=False,
                 enable_safety_layer=enable_safety_layer,
             )  # immediate cost approximated
@@ -207,7 +208,7 @@ class OnPolicyCADEAdapter(OnPolicyAdapter):
         step: int = 0  # Number of steps taken by the agent
 
         while True:
-            # Step CACD
+            # Step CADE
             # act, logp, reward_pred, cost_value_pred, latent = agent.step(obs, latent)  # cost value approximated
             act, logp, act_overlaid, reward_pred, cost_pred, latent = agent.step(
                 obs=obs,
@@ -249,6 +250,7 @@ class OnPolicyCADEAdapter(OnPolicyAdapter):
                 done=terminated or truncated,
                 reward_pred=reward_pred,
                 cost_pred=cost_pred,
+                value_r=reward_pred,  # only takes effect for value critic based advantage estimation methods
                 # value_c=cost_value_pred,
                 next_obs=next_obs,
                 logp=logp,
@@ -274,7 +276,9 @@ class OnPolicyCADEAdapter(OnPolicyAdapter):
                     self._reset_log(idx)
 
                     # Finish epoch by calculating advantages
-                    buffer.finish_path(idx=idx)
+                    # Here we don't step env for another step because episode terminates/truncates at env stage,
+                    # instead of on the training epoch.
+                    buffer.finish_path(last_value_r=None, last_value_c=None, idx=idx)
 
                     # Log mean and max episodic rewards from buffer
                     logger.store({'Metrics/EpRetMean': buffer.buffers[0].mean_ep_ret})
