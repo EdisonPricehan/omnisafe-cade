@@ -12,7 +12,6 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from typing import Optional, List, Tuple, Dict, Any, Literal, get_args
-from pynput import keyboard
 from gymnasium.spaces import Discrete, MultiDiscrete
 import matplotlib.pyplot as plt
 
@@ -22,68 +21,16 @@ from omnisafe.utils.config import Config
 from omnisafe.models.actor_critic import ConstraintActorDynamicsEstimator
 from omnisafe.common.buffer.onpolicy_hitl_buffer import OnPolicyHITLBuffer, save_buffer_to_csv, load_buffer_from_csv
 from omnisafe.utils.math import discount_cumsum, kld_multi_categorical
+from omnisafe.utils.key2action import Key2ActionDrone, Key2ActionBoat
+
 from omnisafe.envs.riverine_env import RiverineEnv
+# from vrx_gym.river_follow_env import WamvGazeboEnv  # for VRX WAM-V environment
 
 # Types of HITL losses, 'None' means no HITL
 LossType = Literal['None', 'IWR', 'HG-DAgger', 'BT', 'DPO', 'Indirect']
 
 # Custom types
 Loss2RewStep: type = Dict[str, Tuple[List[float], List[int]]]
-
-
-class Key2Action:
-    def __init__(self):
-        self.listener = keyboard.Listener(on_press=self.on_press, on_release=self.on_release)
-        self.listener.start()
-        self.last_key = None
-
-    def on_press(self, key):
-        try:
-            pass
-            # print('alphanumeric key {0} pressed'.format(key.char))
-        except AttributeError:
-            print('special key {0} pressed'.format(key))
-
-    def on_release(self, key):
-        if key == keyboard.Key.esc:
-            self.listener.stop()
-            print(f'Keyboard listener is stopped.')
-            return
-        self.last_key = key
-
-    def get_multi_discrete_action(self) -> Optional[List[int]]:
-        # Skip human input, let agent action step the environment
-        if self.last_key == keyboard.Key.space:
-            self.last_key = None
-            return None
-
-        # [vertical translation, horizontal rotation, longitudinal translation, latitudinal translation]
-        action = [1] * 4
-        if self.last_key is None:
-            return action
-
-        if self.last_key == keyboard.KeyCode.from_char('w'):
-            print(f'w is pressed!')
-            action[0] = 0
-        elif self.last_key == keyboard.KeyCode.from_char('s'):
-            action[0] = 2
-        elif self.last_key == keyboard.KeyCode.from_char('a'):
-            action[1] = 0
-        elif self.last_key == keyboard.KeyCode.from_char('d'):
-            action[1] = 2
-        elif self.last_key == keyboard.KeyCode.from_char('i'):
-            action[2] = 0
-        elif self.last_key == keyboard.KeyCode.from_char('k'):
-            action[2] = 2
-        elif self.last_key == keyboard.KeyCode.from_char('j'):
-            action[3] = 0
-        elif self.last_key == keyboard.KeyCode.from_char('l'):
-            action[3] = 2
-        else:
-            print(f'Unrecognized key {self.last_key}')
-
-        self.last_key = None
-        return action
 
 
 class HITLCADE:
@@ -191,7 +138,7 @@ class HITLCADE:
 
         # Set human-in-the-loop interruption
         if self.enable_hitl:
-            self.k2a = Key2Action()
+            self.k2a = Key2ActionDrone()  # TODO only support drone for now
             print(f'Human-in-the-loop is enabled.')
 
     def load_cfgs(self) -> Config:
