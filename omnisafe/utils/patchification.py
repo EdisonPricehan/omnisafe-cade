@@ -82,10 +82,15 @@ def get_patchified_mask(
 
     if isinstance(mask, np.ndarray):
         # Channel dim should be last
-        assert mask.shape[-1] <= 4, f'Channel dim for numpy array should be the last dim.'
+        assert mask.ndim >= 2, f'Dimension of ndarray mask must be at least 2, given dim {mask.ndim}.'
 
-        # Get the 1-channel 2D water mask
-        mask_arr = mask[..., 0]
+        if mask.ndim > 2:
+            assert mask.shape[-1] <= 4, f'Channel dim for numpy array should be the last dim.'
+
+            # Get the 1-channel 2D water mask
+            mask_arr = mask[..., 0]
+        else:
+            mask_arr = mask.copy()
 
         return patch_array(mask_arr, is_uint8, patch_size_x, patch_size_y, patch_step,
                            binary_threshold, patch_threshold)
