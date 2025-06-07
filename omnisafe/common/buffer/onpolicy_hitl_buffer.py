@@ -15,6 +15,13 @@ class OnPolicyHITLBuffer(BaseBuffer):
         size: int,
         device: torch.device = DEVICE_CPU,
     ):
+        """
+        The buffer for on-policy Human-In-The-Loop (HITL) algorithms.
+        :param obs_space: Observation space.
+        :param act_space: Action space.
+        :param size: Maximum size of the buffer.
+        :param device: Where the buffer is stored, by default CPU.
+        """
         super().__init__(obs_space, act_space, size, device)
 
         self.data['reward_pred'] = torch.zeros((size,), dtype=torch.float32, device=device)
@@ -53,6 +60,9 @@ class OnPolicyHITLBuffer(BaseBuffer):
 
         Args:
             df (pd.DataFrame): DataFrame loaded from CSV containing buffer data.
+
+        Returns:
+            None
         """
         num_rows = len(df)
         assert num_rows <= self.max_size, f"Buffer overflow: trying to load {num_rows} rows into max size {self.max_size}"
@@ -73,6 +83,12 @@ class OnPolicyHITLBuffer(BaseBuffer):
         self.ptr = num_rows  # update the buffer pointer
 
     def get(self, reset: bool = True) -> dict[str, torch.Tensor]:
+        """
+        Retrieve all data from the buffer and optionally reset it.
+
+        :param reset: Whether to clear the buffer after getting the data.
+        :return: The dictionary containing all the data in the buffer.
+        """
         data = {
             'obs': self.data['obs'][:self.ptr],
             'act': self.data['act'][:self.ptr],
@@ -98,7 +114,7 @@ class OnPolicyHITLBuffer(BaseBuffer):
         return self.ptr
 
     def full(self) -> bool:
-        return self.max_size == self.ptr
+        return self.ptr >= self.max_size
 
     def clear(self) -> None:
         self.path_start_idx, self.ptr = 0, 0
@@ -106,13 +122,14 @@ class OnPolicyHITLBuffer(BaseBuffer):
 
 def save_buffer_to_csv(data: dict[str, torch.Tensor], filename: str) -> None:
     """
-    Save buffer's dict data to csv file
+    Save buffer's dict data to csv file.
+
     Args:
-        data:
-        filename:
+        data: The dictionary data to be saved.
+        filename: Path to the output csv file.
 
     Returns:
-
+        None
     """
     assert filename != '', f'Empty filename is not allowed!'
 
@@ -128,13 +145,14 @@ def save_buffer_to_csv(data: dict[str, torch.Tensor], filename: str) -> None:
 
 def load_buffer_from_csv(filename: str, buffer: OnPolicyHITLBuffer) -> OnPolicyHITLBuffer:
     """
-    Load csv data as dict then initialize the buffer with the data
+    Load csv data as dict then initialize the buffer with the data.
+
     Args:
-        filename:
-        buffer:
+        filename: Path to csv file.
+        buffer: An inited but empty buffer.
 
     Returns:
-
+        The buffer with data loaded from csv file.
     """
     df = pd.read_csv(filename)
     for col in df.columns:

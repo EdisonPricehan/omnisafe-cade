@@ -3,17 +3,16 @@ import json
 import time
 import csv
 import re
-
+from loguru import logger
 import numpy as np
 import pandas as pd
+from typing import Optional, List, Tuple, Dict, Any, Literal, get_args
+from gymnasium.spaces import Discrete, MultiDiscrete
+import matplotlib.pyplot as plt
 
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
-
-from typing import Optional, List, Tuple, Dict, Any, Literal, get_args
-from gymnasium.spaces import Discrete, MultiDiscrete
-import matplotlib.pyplot as plt
 
 from omnisafe.envs.core import make, CMDP
 from omnisafe.typing import OmnisafeSpace
@@ -46,7 +45,7 @@ class HITLCADE:
         difficulty: int = 1,
         buffer_size: int = 1000,
         retrain_epoch: int = 3,
-        loss_type: LossType = 'n',  # n means no loss
+        loss_type: LossType = 'None',  # None means no hitl loss
         save_ckpts: bool = False,
         render_mode: Optional[str] = 'human',
         enable_hitl: bool = True,
@@ -93,6 +92,7 @@ class HITLCADE:
         self.ep_num: int = 0
 
         # Define stat file path for all eval episodes
+        # Stat includes: episodic reward, episodic cost, episodic steps
         if self.save_path is not None:
             self.seed: str = self.model_dir.split('/')[-1].split('-')[1]
             stat_file_name: str = f'{self.env_id}_hitl{self.enable_hitl}_seed{self.seed}_difficulty{self.difficulty}_loss{self.loss_type}.csv'
@@ -115,7 +115,7 @@ class HITLCADE:
         self.env: CMDP = make(**env_kwarg)
         self.obs_space: OmnisafeSpace = self.env.observation_space
         self.act_space: OmnisafeSpace = self.env.action_space
-        print(f'Environment is created.')
+        logger.info(f'Environment is created.')
 
         # Init the buffer
         self.buffer = OnPolicyHITLBuffer(
@@ -129,17 +129,17 @@ class HITLCADE:
 
         # Load model
         self.cade = self.load_model()
-        print(f'CADE model is loaded.')
+        logger.info(f'CADE model is loaded.')
 
         # Set nominal (default) action
         assert isinstance(self.act_space, MultiDiscrete)
         self.nominal_action = torch.tensor([[1] * self.act_space.nvec.shape[0]])
-        print(f'Nominal action: {self.nominal_action}')
+        logger.info(f'Nominal action: {self.nominal_action}')
 
         # Set human-in-the-loop interruption
         if self.enable_hitl:
             self.k2a = Key2ActionDrone()  # TODO only support drone for now
-            print(f'Human-in-the-loop is enabled.')
+            logger.info(f'Human-in-the-loop keyboard interruption is enabled.')
 
     def load_cfgs(self) -> Config:
         """
@@ -165,6 +165,7 @@ class HITLCADE:
         Load CADE model.
 
         Returns:
+            cade: The loaded CADE model.
 
         """
         assert os.path.exists(self.model_dir), f'Model dir {self.model_dir} does not exist!'
@@ -181,29 +182,25 @@ class HITLCADE:
             epochs=1,  # Not used, for linear lr decay
         )
 
-        # for name, module in cade.named_modules():
-        #     print(f'{name=} {module=}')
-        #     print('-'*40)
-
-        cade.load_state_dict(model_params['actor_critic'])
+        cade.load_state_dict(model_params['actor_critic'])  # TODO might need to change the name here
 
         return cade
 
-    def save_model(self, name: str):
+    def save_model(self, name: str) -> None:
         """
         Save current CADE model.
 
         Args:
-            name:
+            name: Model name with suffix.
 
         Returns:
-
+            None
         """
         assert os.path.exists(self.model_dir), f'Model dir {self.model_dir} does not exist!'
 
         model_path: str = os.path.join(self.model_dir, 'torch_save', name)
 
-        torch.save({'actor_critic': self.cade.state_dict()}, model_path)
+        torch.save({'actor_critic': self.cade.state_dict()}, model_path)  # TODO might need to change the name here
 
     def save_to_file(
         self,
@@ -211,18 +208,18 @@ class HITLCADE:
         ep_cost: float,
         ep_steps: float,
         overwrite: bool = False,
-    ):
+    ) -> None:
         """
         Save episodic statistics into csv file.
 
         Args:
-            ep_rew:
-            ep_cost:
-            ep_steps:
-            overwrite:
+            ep_rew: Episodic reward.
+            ep_cost: Episodic cost.
+            ep_steps: Episodic steps.
+            overwrite: Whether to overwrite the existing file or not.
 
         Returns:
-
+            None
         """
         assert self.save_path is not None
 
@@ -236,12 +233,12 @@ class HITLCADE:
                 writer = csv.writer(file)
                 writer.writerow([ep_rew, ep_cost, ep_steps])
 
-    def close(self):
+    def close(self) -> None:
         """
         Close the environment, optionally close keyboard reader.
 
         Returns:
-
+            None
         """
         self.env.close()
         if self.enable_hitl:
@@ -252,7 +249,7 @@ class HITLCADE:
         Evaluate the loaded policy, optionally retrain it while inferencing if human corrections are available.
 
         Returns:
-
+            Tuple of per-episode reward list and per-episode cost list.
         """
         obs, info = self.env.reset()
 
@@ -273,8 +270,6 @@ class HITLCADE:
                     obs = obs.squeeze(0)
 
                 # Step CADE
-                # print(f'{obs.shape=} {last_action.shape=}')
-                # print(f'Latent shape: {latent.shape if latent is not None else "None"}')
                 # obs.shape=torch.Size([1, 256]), last_action.shape=torch.Size([1, 4]), latent.shape=torch.Size([1, 64])
                 agent_act, logp, act_overlaid, reward_pred, cost_pred, latent = self.cade.step(
                     obs=obs,
@@ -308,7 +303,6 @@ class HITLCADE:
                     cost_pred = self.cade.cost_critic(next_obs_pred)[0]  # only use the first cost critic
 
                 # Step environment
-                # print(f'{act=}')
                 next_obs, reward, cost, terminated, truncated, info = self.env.step(act[0])
                 step += 1
                 last_action.copy_(act)
@@ -341,7 +335,7 @@ class HITLCADE:
                     latent = None
                     last_action.copy_(self.nominal_action)
 
-                    print(f'Episode {self.ep_num} finished with reward {ep_rew:.2f}, cost {ep_cost:.2f}, step: {step}.')
+                    logger.info(f'Episode {self.ep_num} finished with reward {ep_rew:.2f}, cost {ep_cost:.2f}, step: {step}.')
 
                     # Save per-episode stats to file
                     if self.save_path is not None:
@@ -356,8 +350,9 @@ class HITLCADE:
                     if self.save_buffer:
                         filename: str = f'{self.env_id}_hitl{self.enable_hitl}_seed{self.seed}_difficulty{self.difficulty}_loss{self.loss_type}_episode{self.ep_num}.csv'
                         filename = os.path.join(self.save_path, filename)
-                        data = self.buffer.get(reset=False)
+                        data = self.buffer.get(reset=False)  # don't reset here, reset after retraining
                         save_buffer_to_csv(data=data, filename=filename)
+                        logger.info(f'Buffer data of episode {self.ep_num} is saved to {filename}.')
 
                     # Update stats
                     ep_rew_list.append(ep_rew)
@@ -385,8 +380,10 @@ class HITLCADE:
 
             ep_rew_mean, ep_rew_std = np.mean(ep_rew_list), np.std(ep_rew_list)
             ep_cost_mean, ep_cost_std = np.mean(ep_cost_list), np.std(ep_cost_list)
-            print(
-                f'Evaluated {self.ep_num} episodes, ep_rew: {ep_rew_mean:.1f}+-{ep_rew_std:.1f}, ep_cost: {ep_cost_mean:.1f}+-{ep_cost_std:.1f}')
+            logger.info(
+                f'Evaluated {self.ep_num} episodes, '
+                f'ep_rew: {ep_rew_mean:.1f}+-{ep_rew_std:.1f}, '
+                f'ep_cost: {ep_cost_mean:.1f}+-{ep_cost_std:.1f}')
 
             time.sleep(1)  # Give some time for Unity to close
             return ep_rew_list, ep_cost_list
@@ -395,15 +392,17 @@ class HITLCADE:
         self,
         data: dict[str, torch.Tensor],
         epoch: Optional[int] = 3,
-    ):
+    ) -> None:
         """
-        Retrain policy based on the most recent episode with human correction (intervention + demonstration)
+        Retrain policy based on the most recent episode with human correction (intervention + demonstration).
+
         Args:
-            data:
-            epoch:
+            data: Data collected in the most recent episode with human correction.
+            epoch: Number of epochs to retrain the CADE using the buffered episodic data.
+                   If None, use self.retrain_epoch.
 
         Returns:
-
+            None
         """
         obs = data['obs']
         act = data['act']
@@ -424,12 +423,22 @@ class HITLCADE:
             init_distribution, init_reward_pred = self.cade.forward_actor_reward(obs, act)
         assert isinstance(init_distribution, List), f'Currently only support multi-discrete action space.'
 
-        print(f'Starting retraining for episode {self.ep_num} ...')
+        logger.info(f'Starting retraining for episode {self.ep_num} ...')
 
         for e in range(epoch if epoch is not None else self.retrain_epoch):
+            # Zero gradients
+            self.cade.gru_optimizer.zero_grad()
+            self.cade.actor_optimizer.zero_grad()
+            self.cade.reward_critic_optimizer.zero_grad()
+
+            # Calculate loss based on different HITL loss types
             if self.loss_type == 'Indirect':
+                # First update reward estimator
                 reward_loss = self.calc_reward_estimator_loss(obs, act, act_agent, act_overlaid)
                 reward_loss.backward()
+                self.cade.reward_critic_optimizer.step()
+
+                # Then update policy using the learned reward as advantage
                 distribution, reward_pred = self.cade.forward_actor_reward(obs, act)
                 reward_adv = self.calc_reward_adv(reward_pred[0], baseline_return=25.)
                 loss = self.policy_loss_by_hitl_reward(distribution, init_distribution, act, logp, reward_adv)
@@ -446,27 +455,19 @@ class HITLCADE:
                 else:
                     raise NotImplementedError(f'Loss {self.loss_type} is not supported.')
 
-            # print(f'{loss=}')
-
-            # Zero gradients
-            self.cade.gru_optimizer.zero_grad()
-            self.cade.actor_optimizer.zero_grad()
-            self.cade.reward_critic_optimizer.zero_grad()
-
-            # Calculate gradients from loss
+            # Calculate gradients from policy loss
             loss.backward()
 
-            # Update parameters
+            # Update recurrent and policy parameters
             self.cade.gru_optimizer.step()
             self.cade.actor_optimizer.step()
-            self.cade.reward_critic_optimizer.step()
 
-        print(f'Retraining for episode {self.ep_num} of loss {self.loss_type} for {epoch} epochs is done.')
+        logger.info(f'Retraining for episode {self.ep_num} of loss {self.loss_type} for {epoch} epochs is done.')
 
         if self.save_ckpts:
             ckpt_name: str = f'episode-{self.ep_num:03}-hitl-{self.enable_hitl}-loss-{self.loss_type}.pt'
             self.save_model(name=ckpt_name)
-            print(f'Checkpoint is saved as {ckpt_name}.')
+            logger.info(f'Checkpoint is saved as {ckpt_name}.')
 
     def calc_reward_estimator_loss(
         self,
@@ -476,16 +477,16 @@ class HITLCADE:
         act_overlaid: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Bradley-Terry preference loss on human corrected data samples.
+        Bradley-Terry preference loss of reward estimator in CADE, on human corrected data samples.
 
         Args:
-            obs:
-            act:
-            act_agent:
-            act_overlaid:
+            obs: Observations, [num_samples, obs_dim]
+            act: Actually executed action, including both agent and human actions, [num_samples, num_branches]
+            act_agent: Agent action, including both intended and executed actions, [num_samples, num_branches]
+            act_overlaid: Mask of human intervention, [num_samples]
 
         Returns:
-
+            loss: Calculated loss.
         """
         total_loss = torch.tensor(0.0, dtype=torch.float32, device=act.device)
 
@@ -502,9 +503,11 @@ class HITLCADE:
 
         *_, final_mask = filtered
 
+        # Only consider entries where human intervened and action differs from agent's original action
         filtered_reward_pred_actual = reward_pred_actual[0][final_mask]
         filtered_reward_pred_intended = reward_pred_intended[0][final_mask]
 
+        # Bradley-Terry loss
         loss = -torch.log(torch.sigmoid(filtered_reward_pred_actual - filtered_reward_pred_intended + 1e-8)).mean()
 
         return loss
@@ -514,7 +517,9 @@ class HITLCADE:
         reward_pred: torch.Tensor,
         baseline_return: float,  # TODO not used
     ) -> torch.Tensor:
-        """Reward as reward advantage, with normalization
+        """
+        Single reward as reward advantage, with normalization.
+        TODO can be replaced by more advanced reward-to-go or GAE.
 
         Args:
             reward_pred:
@@ -528,88 +533,6 @@ class HITLCADE:
         adv = (reward_pred - mean) / (std + 1e-8)
         return adv
 
-    def policy_loss_by_hitl_reward(
-        self,
-        policy_distributions: List[Categorical],
-        init_policy_distributions: List[Categorical],
-        act: torch.Tensor,
-        logp: torch.Tensor,
-        adv: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        FOCOPS policy loss.
-        (https://proceedings.neurips.cc/paper_files/paper/2020/file/af5d5ef24881f3c3049a7b9bfe74d58b-Paper.pdf)
-
-        Args:
-            policy_distributions:
-            init_policy_distributions:
-            act:
-            logp:
-            adv:
-
-        Returns:
-
-        """
-        logp_ = self.cade.actor.log_prob(act)  # log prob of actually executed actions
-        ratio = torch.exp(logp_ - logp)
-        kl = kld_multi_categorical(policy_distributions, init_policy_distributions)
-
-        # FOCOPS loss
-        loss = ((kl - (1 / self.cfgs.algo_cfgs.focops_lam) * ratio * adv) *
-                (kl.detach() <= self.cfgs.algo_cfgs.focops_eta).type(torch.float32))
-
-        loss = loss.mean()
-
-        return loss
-
-    def weighted_bc_loss(
-        self,
-        policy_distributions: List[Categorical],
-        act: torch.Tensor,
-        act_overlaid: torch.Tensor,
-        hg_dagger: bool = False,
-    ) -> torch.Tensor:
-        """
-        Loss of weighted Behavior Cloning.
-        Can be adapted to Intervention Weighted Regression (IWR, https://arxiv.org/pdf/2012.06733),
-        or HG-DAgger (https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=8793698)
-
-        Args:
-            policy_distributions:
-            act:
-            act_overlaid:
-            hg_dagger: only considers the loss where human has intervened
-
-        Returns:
-
-        """
-        # Behavior Cloning loss
-        total_loss = 0.
-        act_branches: int = len(policy_distributions)
-        act = act.long()  # indices
-
-        for i, dist in enumerate(policy_distributions):
-            logits = dist.logits  # [batch, action num in a single branch]
-            loss = F.cross_entropy(logits, act[:, i], reduction='none')
-            total_loss += loss
-
-        avg_loss = total_loss / act_branches  # [batch,]
-
-        # Apply different weights to different samples (Intervention Weighted Regression)
-        # Human-in-the-Loop Imitation Learning using Remote Teleoperation (https://arxiv.org/pdf/2012.06733)
-        num_human_actions = act_overlaid.sum().item()
-        num_policy_actions = act_overlaid.numel() - num_human_actions
-        if num_human_actions == 0:
-            weight_ratio = 1.
-        else:
-            weight_ratio = num_policy_actions / num_human_actions
-        weights = torch.where(act_overlaid == 1, weight_ratio, 0 if hg_dagger else 1)
-        # print(f'{weights=}')
-
-        avg_loss = avg_loss * weights
-
-        return avg_loss.mean()
-
     def filter(
         self,
         policy_distributions: List[Categorical],
@@ -617,7 +540,8 @@ class HITLCADE:
         act_agent: torch.Tensor,
         act_overlaid: torch.Tensor,
     ) -> Optional[Tuple[List[Categorical], torch.Tensor, torch.Tensor, torch.Tensor]]:
-        """Filter out data where human intervention occurred AND action differs from agent's original action.
+        """
+        Filter out data where human intervention occurred AND action differs from agent's original action.
 
         Args:
             policy_distributions: List of policy branches
@@ -626,6 +550,7 @@ class HITLCADE:
             act_overlaid: Mask of human intervention, [num_samples]
 
         Returns:
+            None if no human intervention exists or no corrective human action exists, else return:
             filtered_policy_distributions: List of policy branches with filtered batch
             filtered_act: [num_filtered, num_branches]
             filtered_act_agent: [num_filtered, num_branches]
@@ -654,8 +579,10 @@ class HITLCADE:
         final_indices = indices[unequal_mask]
         final_mask[final_indices] = True  # [batch_size]
 
-        print(
-            f'Total steps: {act_overlaid.size(0)}, human steps: {human_mask.sum()}, human corrective steps: {final_mask.sum()}.')
+        logger.info(
+            f'Total steps: {act_overlaid.size(0)}, '
+            f'human steps: {human_mask.sum()}, '
+            f'human corrective steps: {final_mask.sum()}.')
 
         # Apply mask to all data
         filtered_act = act[final_mask].long()
@@ -667,6 +594,95 @@ class HITLCADE:
         ]
 
         return filtered_policy_distributions, filtered_act, filtered_act_agent, final_mask
+
+    def policy_loss_by_hitl_reward(
+        self,
+        policy_distributions: List[Categorical],
+        init_policy_distributions: List[Categorical],
+        act: torch.Tensor,
+        logp: torch.Tensor,
+        adv: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        FOCOPS policy loss.
+        (https://proceedings.neurips.cc/paper_files/paper/2020/file/af5d5ef24881f3c3049a7b9bfe74d58b-Paper.pdf)
+        Currently only support multi-discrete action space.
+
+        Args:
+            policy_distributions: List of policy distributions for mutli-discrete action space after update.
+            init_policy_distributions: List of policy distributions before update.
+            act: Actually executed action, including both agent and human actions, [num_samples, num_branches].
+            logp: Log prob of agent actions, [number_samples,], summed over all action branches.
+            adv: Reward advantage as calculated in calc_reward_adv(), [num_samples].
+
+        Returns:
+            loss: Calculated policy loss.
+        """
+        logp_ = self.cade.actor.log_prob(act)  # log prob of actually executed actions
+        ratio = torch.exp(logp_ - logp)
+        kl = kld_multi_categorical(policy_distributions, init_policy_distributions)
+
+        # FOCOPS loss
+        loss = ((kl - (1 / self.cfgs.algo_cfgs.focops_lam) * ratio * adv) *
+                (kl.detach() <= self.cfgs.algo_cfgs.focops_eta).type(torch.float32))
+
+        loss = loss.mean()
+
+        return loss
+
+    def weighted_bc_loss(
+        self,
+        policy_distributions: List[Categorical],
+        act: torch.Tensor,
+        act_overlaid: torch.Tensor,
+        hg_dagger: bool = False,
+    ) -> torch.Tensor:
+        """
+        Loss of weighted Behavior Cloning.
+        Can be adapted to Intervention Weighted Regression (IWR, https://arxiv.org/pdf/2012.06733),
+        or HG-DAgger (https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=8793698)
+
+        Args:
+            policy_distributions: List of policy distributions for mutli-discrete action space after update.
+            act: Actually executed action, including both agent and human actions, [num_samples, num_branches].
+            act_overlaid: Mask of human intervention, [num_samples].
+            hg_dagger: Whether only considers the loss where human has intervened.
+
+        Returns:
+            loss: Calculated policy loss.
+        """
+        # Behavior Cloning loss
+        total_loss = 0.
+        act_branches: int = len(policy_distributions)
+        act = act.long()  # indices
+
+        # Iterate over each action branch for multi-discrete action space
+        for i, dist in enumerate(policy_distributions):
+            logits = dist.logits  # [batch, action num in a single branch]
+            loss = F.cross_entropy(logits, act[:, i], reduction='none')
+            total_loss += loss
+
+        # Average loss over all branches
+        avg_loss = total_loss / act_branches  # [batch,]
+
+        # Apply different weights to different samples (Intervention Weighted Regression)
+        # Human-in-the-Loop Imitation Learning using Remote Teleoperation (https://arxiv.org/pdf/2012.06733)
+        num_human_actions = act_overlaid.sum().item()
+        num_policy_actions = act_overlaid.numel() - num_human_actions
+        if num_human_actions == 0:
+            # Uniform weights if no human actions
+            weight_ratio = 1.
+        else:
+            # More proportion of human actions, less emphasis on human actions
+            # Less proportion of human actions, more emphasis on human actions
+            weight_ratio = num_policy_actions / num_human_actions
+        weights = torch.where(act_overlaid == 1, weight_ratio, 0 if hg_dagger else 1)
+        # print(f'{weights=}')
+
+        # Weighted loss across the sample dimension
+        avg_loss = avg_loss * weights
+
+        return avg_loss.mean()
 
     def bt_loss(
         self,
@@ -680,13 +696,13 @@ class HITLCADE:
         (https://en.wikipedia.org/wiki/Bradley%E2%80%93Terry_model)
 
         Args:
-            policy_distributions:
-            act:
-            act_agent:
-            act_overlaid:
+            policy_distributions: List of policy distributions for mutli-discrete action space after update.
+            act: Actually executed action, including both agent and human actions, [num_samples, num_branches].
+            act_agent: Agent action, including both intended and executed actions, [num_samples, num_branches].
+            act_overlaid: Mask of human intervention, [num_samples].
 
         Returns:
-
+            loss: Calculated policy loss.
         """
         total_loss = torch.tensor(0.0, dtype=torch.float32, device=act.device)
         act_branches = len(policy_distributions)
@@ -729,11 +745,11 @@ class HITLCADE:
         https://proceedings.neurips.cc/paper_files/paper/2023/file/a85b405ed65c6477a4fe8302b5e06ce7-Paper-Conference.pdf
 
         Args:
-            policy_distributions:
-            ref_policy_distributions:
-            act:
-            act_agent:
-            act_overlaid:
+            policy_distributions: List of policy distributions for mutli-discrete action space after update.
+            ref_policy_distributions: List of policy distributions for mutli-discrete action space from reference model.
+            act: Actually executed action, including both agent and human actions, [num_samples, num_branches].
+            act_agent: Agent action, including both intended and executed actions, [num_samples, num_branches].
+            act_overlaid: Mask of human intervention, [num_samples].
             beta: Scaling factor controlling divergence from the reference model.
 
         Returns:
@@ -781,23 +797,23 @@ class HITLCADE:
         return total_loss / act_branches
 
 
-def eval_multiple_models(model_path: str) -> None:
+def eval_multiple_models(model_dir: str) -> None:
     """
     Evaluate CADE models trained with different loss types.
 
     Args:
-        model_path: directory storing checkpoints.
+        model_dir: Directory storing checkpoints.
 
     Returns:
-
+        None
     """
-    assert os.path.exists(model_path), f'{model_path} does not exist.'
+    assert os.path.exists(model_dir), f'{model_dir} does not exist.'
 
-    loss_tuple = get_args(LossType) + tuple('n')
-    print(f'{loss_tuple=}')
+    loss_tuple = get_args(LossType)
+    logger.info(f'{loss_tuple=}')
 
     for loss_type in loss_tuple:
-        if loss_type == 'n':  # no HITL loss
+        if loss_type == 'None':  # no HITL loss
             model_name: str = 'episode-000.pt'
         else:
             model_name: str = f'episode-000-loss-{loss_type}.pt'
@@ -819,9 +835,9 @@ def eval_multiple_models(model_path: str) -> None:
             enable_retrain=False,
         )
 
-        print(f'Start eval of loss {loss_type} ...')
+        logger.info(f'Start eval of loss {loss_type} ...')
         hitl_cade.evaluate()
-        print(f'Eval of loss {loss_type} finished.')
+        logger.info(f'Eval of loss {loss_type} finished.')
 
 
 def extract_episode_id(filename: str, key: str = 'episode') -> int:
@@ -829,11 +845,11 @@ def extract_episode_id(filename: str, key: str = 'episode') -> int:
     Extract integer episode id from string filename, used to sort files containing integer after the key string.
 
     Args:
-        filename:
-        key:
+        filename: Path to the file.
+        key: Key string before the integer episode id.
 
     Returns:
-
+        Extracted integer episode id, or -1 if not found.
     """
     base = os.path.basename(filename)
     pattern = rf"{key}[-_]?(\d+)"
@@ -842,7 +858,7 @@ def extract_episode_id(filename: str, key: str = 'episode') -> int:
 
 
 def integral_retrain(save_path: str, loss_type: LossType) -> None:
-    f"""
+    """
     Integrally retrain the CADE models using episodes with human intervention data.
     For example, checkpoint N trained on episode N will serve as the start point of training on episode N+1, which
     results in checkpoint N+1.
@@ -851,11 +867,14 @@ def integral_retrain(save_path: str, loss_type: LossType) -> None:
     Args:
         save_path: directory storing the evaluation episodes with human interventions.
         loss_type: hitl loss type.
+
+    Returns:
+        None
    """
     assert os.path.exists(save_path), f'Save path {save_path} does not exist.'
     assert loss_type in get_args(LossType), f'Loss type {loss_type} is not supported.'
 
-    print(f'Start integral retraining for loss {loss_type} ...')
+    logger.info(f'Start integral retraining for loss {loss_type} ...')
     episodes_paths: List[str] = []
     for item in os.scandir(save_path):
         if not item.is_file():
@@ -869,7 +888,7 @@ def integral_retrain(save_path: str, loss_type: LossType) -> None:
     # print(f'{episodes_paths=}')
 
     sorted_episodes_paths: List[str] = sorted(episodes_paths, key=lambda path: extract_episode_id(path, 'episode'))
-    print(f'{sorted_episodes_paths=}')
+    logger.info(f'{sorted_episodes_paths=}')
 
     # Init HITL CADE
     hitl_cade = HITLCADE(
@@ -895,7 +914,7 @@ def integral_retrain(save_path: str, loss_type: LossType) -> None:
         hitl_cade.retrain(hitl_cade.buffer.get())
 
     hitl_cade.close()
-    print(f'Integral retraining of {len(sorted_episodes_paths)} episodes for loss {loss_type} is done.')
+    logger.info(f'Integral retraining of {len(sorted_episodes_paths)} episodes for loss {loss_type} is done.')
 
 
 def eval_integral_retrained_ckpts(model_path: str, loss_type: LossType) -> None:
@@ -906,6 +925,8 @@ def eval_integral_retrained_ckpts(model_path: str, loss_type: LossType) -> None:
         model_path: directory storing the checkpoints.
         loss_type: hitl loss type.
 
+    Returns:
+        None
     """
     assert os.path.exists(model_path), f'{model_path} does not exist.'
     assert loss_type in get_args(LossType), f'Loss {loss_type} is not supported.'
@@ -920,11 +941,11 @@ def eval_integral_retrained_ckpts(model_path: str, loss_type: LossType) -> None:
     # print(f'{ckpt_paths=}')
 
     sorted_ckpt_paths: List[str] = sorted(ckpt_paths, key=lambda path: extract_episode_id(path, 'episode'))
-    print(f'{sorted_ckpt_paths=}')
+    logger.info(f'{sorted_ckpt_paths=}')
 
     for ckpt_id, ckpt_path in enumerate(sorted_ckpt_paths):
         model_name: str = os.path.basename(ckpt_path)
-        print(f'Start eval of checkpoint {model_name} for loss {loss_type} ...')
+        logger.info(f'Start eval of checkpoint {model_name} for loss {loss_type} ...')
 
         # Init and evaluate
         hitl_cade = HITLCADE(
@@ -949,7 +970,7 @@ def eval_integral_retrained_ckpts(model_path: str, loss_type: LossType) -> None:
 
         hitl_cade.evaluate()
 
-        print(f'Eval of checkpoint {ckpt_id} for loss {loss_type} is finished.')
+        logger.info(f'Eval of checkpoint {ckpt_id} for loss {loss_type} is finished.')
 
 
 def get_statistics(metrics_dir: str, ckpt_id: Optional[int] = None) -> Loss2RewStep:
@@ -975,8 +996,6 @@ def get_statistics(metrics_dir: str, ckpt_id: Optional[int] = None) -> Loss2RewS
         ):
             if ckpt_id is not None and 'None' not in item.name and f'ckpt{ckpt_id}' not in item.name:
                 continue
-
-            print(f'{item.name=}')
 
             file_path: str = os.path.join(metrics_dir, item.name)
             df = pd.read_csv(file_path)
@@ -1004,9 +1023,11 @@ def plot_stat_loss_types(stat: Loss2RewStep, plot_ratio: bool = False) -> None:
         stat: dictionary of loss type to list of episodic rewards.
         plot_ratio: whether to plot the episodic reward over episodic steps ratio, which is a measure of efficiency.
 
+    Returns:
+        None
     """
     # Plot parameters
-    print(stat.keys())
+    logger.info(stat.keys())
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
@@ -1044,6 +1065,8 @@ def plot_stat_ckpts(
         loss_type: hitl loss type.
         plot_ratio: whether to plot the episodic reward over episodic steps ratio, which is a measure of efficiency.
 
+    Returns:
+        None
     """
     assert os.path.exists(metrics_dir), f'{metrics_dir} does not exist.'
     assert loss_type in get_args(LossType), f'Loss {loss_type} is not supported.'
@@ -1056,8 +1079,6 @@ def plot_stat_ckpts(
         if 'ckpt' not in item.name:
             continue
 
-        print(f'{item.name=}')
-
         ckpt_eval_path: str = os.path.join(metrics_dir, item.name)
         ckpt_id: int = extract_episode_id(filename=ckpt_eval_path, key='ckpt')
         df = pd.read_csv(ckpt_eval_path)
@@ -1066,7 +1087,7 @@ def plot_stat_ckpts(
         ckpt_to_ep_rews_steps[ckpt_id] = (ep_rews, ep_steps)
 
     ckpt_to_ep_rews_steps = dict(sorted(ckpt_to_ep_rews_steps.items()))
-    print(f'{ckpt_to_ep_rews_steps=}')
+    logger.info(f'{ckpt_to_ep_rews_steps=}')
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
@@ -1144,7 +1165,7 @@ if __name__ == '__main__':
             hitl_cade.evaluate()
         else:
             # Evaluate multiple HITL models
-            # eval_multiple_models(model_path=model_dir)
+            # eval_multiple_models(model_dir=model_dir)
 
             # Evaluate integral retrained HITL checkpoints
             eval_integral_retrained_ckpts(model_path=model_dir, loss_type=loss_type)
