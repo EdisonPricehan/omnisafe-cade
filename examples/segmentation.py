@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from PIL import Image
 
-from seg_model import LitSegModel as LSM
+from lit_seg_model import LitSegModel as LSM
 
 
 class Segmenter:
