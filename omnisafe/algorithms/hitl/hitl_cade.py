@@ -6,15 +6,14 @@ import re
 from loguru import logger
 import numpy as np
 import pandas as pd
-from typing import Optional, List, Tuple, Dict, Any, Literal, get_args
-from gymnasium.spaces import Discrete, MultiDiscrete
+from typing import Optional, List, Tuple, Dict, Any, Literal, Union, get_args
+from gymnasium.spaces import Discrete, MultiDiscrete, MultiBinary
 import matplotlib.pyplot as plt
 
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from omnisafe.envs.core import make, CMDP
 from omnisafe.typing import OmnisafeSpace
 from omnisafe.utils.config import Config
 from omnisafe.models.actor_critic import ConstraintActorDynamicsEstimator
@@ -22,8 +21,6 @@ from omnisafe.common.buffer.onpolicy_hitl_buffer import OnPolicyHITLBuffer, save
 from omnisafe.utils.math import discount_cumsum, kld_multi_categorical
 from omnisafe.utils.key2action import Key2ActionDrone, Key2ActionBoat
 
-from omnisafe.envs.riverine_env import RiverineEnv
-# from vrx_gym.river_follow_env import WamvGazeboEnv  # for VRX WAM-V environment
 
 # Types of HITL losses, 'None' means no HITL
 LossType = Literal['None', 'IWR', 'HG-DAgger', 'BT', 'DPO', 'Indirect']
@@ -32,13 +29,13 @@ LossType = Literal['None', 'IWR', 'HG-DAgger', 'BT', 'DPO', 'Indirect']
 Loss2RewStep: type = Dict[str, Tuple[List[float], List[int]]]
 
 
-class HITLCADE:
+class HitlCade:
     def __init__(
         self,
-        env_id: str,
         model_dir: str,
         model_name: str,
-        eval_episodes: int,
+        env_id: Optional[str] = None,
+        eval_episodes: int = 1,
         deterministic: bool = True,
         save_path: Optional[str] = None,
         save_buffer: bool = True,
@@ -50,6 +47,7 @@ class HITLCADE:
         render_mode: Optional[str] = 'human',
         enable_hitl: bool = True,
         enable_retrain: bool = True,
+        device: Union[torch.device, str] = 'cpu'  # Device to run the model on, e.g., 'cuda:0' or 'cpu'
     ):
         """
         Human-in-the-loop Constrained Actor Dynamics Estimator (HITL-CADE) evaluation and improvement process.
@@ -72,7 +70,7 @@ class HITLCADE:
             enable_retrain: Whether to enable retraining of CADE during evaluation.
         """
         # Init parameters
-        self.env_id: str = env_id
+        self.env_id: Optional[str] = env_id
         self.model_dir: str = model_dir
         self.model_name: str = model_name
         self.eval_episodes: int = eval_episodes
@@ -87,6 +85,7 @@ class HITLCADE:
         self.render_mode: Optional[str] = render_mode
         self.enable_hitl: bool = enable_hitl
         self.enable_retrain: bool = enable_retrain
+        self.device: Union[torch.device, str] = device
 
         # Variables
         self.ep_num: int = 0
@@ -94,28 +93,23 @@ class HITLCADE:
         # Define stat file path for all eval episodes
         # Stat includes: episodic reward, episodic cost, episodic steps
         if self.save_path is not None:
-            self.seed: str = self.model_dir.split('/')[-1].split('-')[1]
-            stat_file_name: str = f'{self.env_id}_hitl{self.enable_hitl}_seed{self.seed}_difficulty{self.difficulty}_loss{self.loss_type}.csv'
+            if 'seed' in self.model_dir:
+                self.seed: str = self.model_dir.split('/')[-1].split('-')[1]
+            else:
+                self.seed: str = '000'  # Default seed if not specified in model_dir
+            env_name: str = 'real' if self.env_id is None else self.env_id  # 'real' for real-world riverine environment
+            stat_file_name: str = f'{env_name}_hitl{self.enable_hitl}_seed{self.seed}_difficulty{self.difficulty}_loss{self.loss_type}.csv'
             self.stat_file_path: str = os.path.join(self.save_path, stat_file_name)
 
         # Init env
-        env_kwarg: Dict[str, Any] = {
-            'env_id': env_id,
-            'render_mode': self.render_mode,
-            'max_idle_steps': 500000,  # allow time for human intervention
-        }
-        assert 0 <= difficulty <= 2, f'Difficulty {difficulty} is not in range [0, 2].'
-        if difficulty == 0:
-            env_kwarg['env_id'] = 'easy'
-        elif difficulty == 1:
-            env_kwarg['env_id'] = 'medium'
-        elif difficulty == 2:
-            env_kwarg['env_id'] = 'hard'
-
-        self.env: CMDP = make(**env_kwarg)
-        self.obs_space: OmnisafeSpace = self.env.observation_space
-        self.act_space: OmnisafeSpace = self.env.action_space
-        logger.info(f'Environment is created.')
+        if self.env_id is not None:
+            self.setup_env()
+            logger.info(f'Environment is created.')
+        else:
+            logger.info('Real world riverine environment is used.')
+            self.env = None
+            self.obs_space: OmnisafeSpace = HitlCade.gen_obs_space()
+            self.act_space: OmnisafeSpace = HitlCade.gen_act_space()
 
         # Init the buffer
         self.buffer = OnPolicyHITLBuffer(
@@ -140,6 +134,39 @@ class HITLCADE:
         if self.enable_hitl:
             self.k2a = Key2ActionDrone()  # TODO only support drone for now
             logger.info(f'Human-in-the-loop keyboard interruption is enabled.')
+
+    @staticmethod
+    def gen_obs_space() -> OmnisafeSpace:
+        return MultiBinary(16 * 16)
+
+    @staticmethod
+    def gen_act_space() -> OmnisafeSpace:
+        return MultiDiscrete([3, 3, 3, 3])
+
+    def setup_env(self):
+        assert self.env_id is not None, 'Environment ID must be specified to setup the environment.'
+
+        # Lazy import when env_id is not None
+        from omnisafe.envs.core import make, CMDP
+        from omnisafe.envs.riverine_env import RiverineEnv  # for Unity Safe Riverine Environment of drone
+        # from vrx_gym.river_follow_env import WamvGazeboEnv  # for Gazebo VRX WAM-V environment of boat
+
+        env_kwarg: Dict[str, Any] = {
+            'env_id': env_id,
+            'render_mode': self.render_mode,
+            'max_idle_steps': 500000,  # allow time for human intervention
+        }
+        assert 0 <= difficulty <= 2, f'Difficulty {difficulty} is not in range [0, 2].'
+        if difficulty == 0:
+            env_kwarg['env_id'] = 'easy'
+        elif difficulty == 1:
+            env_kwarg['env_id'] = 'medium'
+        elif difficulty == 2:
+            env_kwarg['env_id'] = 'hard'
+
+        self.env: CMDP = make(**env_kwarg)
+        self.obs_space: OmnisafeSpace = self.env.observation_space
+        self.act_space: OmnisafeSpace = self.env.action_space
 
     def load_cfgs(self) -> Config:
         """
@@ -170,10 +197,10 @@ class HITLCADE:
         """
         assert os.path.exists(self.model_dir), f'Model dir {self.model_dir} does not exist!'
 
-        model_path: str = os.path.join(self.model_dir, 'torch_save', self.model_name)
+        model_path: str = os.path.join(os.path.dirname(__file__), self.model_dir, 'torch_save', self.model_name)
         assert os.path.exists(model_path), f'Model path {model_path} does not exist!'
 
-        model_params = torch.load(model_path, map_location='cpu')
+        model_params = torch.load(model_path, map_location=self.device)
 
         cade: ConstraintActorDynamicsEstimator = ConstraintActorDynamicsEstimator(
             obs_space=self.obs_space,
@@ -183,6 +210,8 @@ class HITLCADE:
         )
 
         cade.load_state_dict(model_params['actor_critic'])  # TODO might need to change the name here
+
+        cade = cade.to(self.device)
 
         return cade
 
@@ -240,7 +269,9 @@ class HITLCADE:
         Returns:
             None
         """
-        self.env.close()
+        if self.env is not None:
+            self.env.close()
+
         if self.enable_hitl:
             self.k2a.listener.stop()
 
@@ -251,7 +282,7 @@ class HITLCADE:
         Returns:
             Tuple of per-episode reward list and per-episode cost list.
         """
-        obs, info = self.env.reset()
+        obs, info = self.env.reset()  # TODO Check env None
 
         latent = None
         ep_rew_list: List[float] = []  # per-episode reward return
@@ -303,7 +334,7 @@ class HITLCADE:
                     cost_pred = self.cade.cost_critic(next_obs_pred)[0]  # only use the first cost critic
 
                 # Step environment
-                next_obs, reward, cost, terminated, truncated, info = self.env.step(act[0])
+                next_obs, reward, cost, terminated, truncated, info = self.env.step(act[0])  # TODO check env None
                 step += 1
                 last_action.copy_(act)
                 ep_rew += reward.item()
@@ -387,6 +418,18 @@ class HITLCADE:
 
             time.sleep(1)  # Give some time for Unity to close
             return ep_rew_list, ep_cost_list
+
+    def deploy(self):
+        """
+        Deploy the HITL CADE algorithm for human-in-the-loop evaluation and improvement.
+
+        Returns:
+            Tuple of per-episode reward list and per-episode cost list.
+        """
+        assert self.env is None, 'Deploy mode does not support environment interaction.'
+
+
+
 
     def retrain(
         self,
@@ -819,7 +862,7 @@ def eval_multiple_models(model_dir: str) -> None:
             model_name: str = f'episode-000-loss-{loss_type}.pt'
 
         # Init and evaluate
-        hitl_cade = HITLCADE(
+        hitl_cade = HitlCade(
             env_id=env_id,
             model_dir=model_dir,
             model_name=model_name,
@@ -891,7 +934,7 @@ def integral_retrain(save_path: str, loss_type: LossType) -> None:
     logger.info(f'{sorted_episodes_paths=}')
 
     # Init HITL CADE
-    hitl_cade = HITLCADE(
+    hitl_cade = HitlCade(
         env_id=env_id,
         model_dir=model_dir,
         model_name=model_name,
@@ -948,7 +991,7 @@ def eval_integral_retrained_ckpts(model_path: str, loss_type: LossType) -> None:
         logger.info(f'Start eval of checkpoint {model_name} for loss {loss_type} ...')
 
         # Init and evaluate
-        hitl_cade = HITLCADE(
+        hitl_cade = HitlCade(
             env_id=env_id,
             model_dir=model_dir,
             model_name=model_name,
@@ -1147,7 +1190,7 @@ if __name__ == '__main__':
     if evaluate:
         if evaluate_single:
             # Evaluate with HITL
-            hitl_cade = HITLCADE(
+            hitl_cade = HitlCade(
                 env_id=env_id,
                 model_dir=model_dir,
                 model_name=model_name,
@@ -1173,7 +1216,7 @@ if __name__ == '__main__':
         if retrain_single:
             # Test of HITL retraining
             csv_filename: str = './evaluations/riverine/medium_hitlTrue_seed000_difficulty1_episode0.csv'
-            hitl_cade = HITLCADE(
+            hitl_cade = HitlCade(
                 env_id=env_id,
                 model_dir=model_dir,
                 model_name=model_name,
