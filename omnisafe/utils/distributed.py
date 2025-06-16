@@ -23,8 +23,17 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.distributed as dist
-from torch.distributed import ReduceOp
+
+try:
+    import torch.distributed as dist
+    from torch.distributed import ReduceOp
+
+    _HAS_DIST = True
+except ImportError:
+    _HAS_DIST = False
+
+    class ReduceOp:
+        SUM = MAX = MIN = None
 
 
 def setup_distributed() -> None:
@@ -33,6 +42,11 @@ def setup_distributed() -> None:
     Avoid slowdowns caused by each separate process's PyTorch, using more than its fair share of CPU
     resources.
     """
+    if not _HAS_DIST:
+        print('Distributed training is not available. Please install PyTorch with distributed support.',
+              flush=True)
+        return
+
     old_num_threads = torch.get_num_threads()
     # decrease number of torch threads for MPI
     if old_num_threads > 1 and world_size() > 1:
@@ -56,7 +70,7 @@ def get_rank() -> int:
     Returns:
         The rank of calling process.
     """
-    if os.getenv('MASTER_ADDR') is None:
+    if not _HAS_DIST or os.getenv('MASTER_ADDR') is None:
         return 0
     return dist.get_rank()
 
@@ -67,17 +81,41 @@ def world_size() -> int:
     Returns:
         The number of active MPI processes.
     """
-    if os.getenv('MASTER_ADDR') is None:
+    if not _HAS_DIST or os.getenv('MASTER_ADDR') is None:
         return 1
     return dist.get_world_size()
 
 
-reduce = dist.reduce
-all_reduce = dist.all_reduce
-gather = dist.gather
-all_gather = dist.all_gather
-broadcast = dist.broadcast
-scatter = dist.scatter
+if _HAS_DIST:
+    reduce = dist.reduce
+    all_reduce = dist.all_reduce
+    gather = dist.gather
+    all_gather = dist.all_gather
+    broadcast = dist.broadcast
+    scatter = dist.scatter
+else:
+    def reduce(*args, **kwargs):
+        pass
+
+
+    def all_reduce(*args, **kwargs):
+        pass
+
+
+    def gather(*args, **kwargs):
+        pass
+
+
+    def all_gather(*args, **kwargs):
+        pass
+
+
+    def broadcast(*args, **kwargs):
+        pass
+
+
+    def scatter(*args, **kwargs):
+        pass
 
 
 def fork(
@@ -97,6 +135,11 @@ def fork(
         manual_args (list of str or None, optional): The arguments to be passed to the new
             processes. Defaults to None.
     """
+    if not _HAS_DIST:
+        print('Distributed training is not available. Please install PyTorch with distributed support.',
+              flush=True)
+        return False
+
     backend = 'gloo' if device == 'cpu' else 'nccl'
     if os.getenv('MASTER_ADDR') is not None and os.getenv('IN_DIST') is None:
         dist.init_process_group(backend=backend)
@@ -350,7 +393,7 @@ def dist_op(value: np.ndarray | torch.Tensor | float, operation: Any) -> torch.T
     Returns:
         Operated (SUM, MAX, MIN) tensor.
     """
-    if world_size() == 1:
+    if not _HAS_DIST or world_size() == 1:
         return torch.as_tensor(value, dtype=torch.float32)
     value_, scalar = ([value], True) if np.isscalar(value) else (value, False)
     value = torch.as_tensor(value_, dtype=torch.float32)
