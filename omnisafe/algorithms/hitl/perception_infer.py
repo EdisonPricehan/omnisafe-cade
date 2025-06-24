@@ -171,7 +171,7 @@ class PerceptionInfer:
         else:  # Assume the image_arr is of shape (C, H, W) and of uint8 type, need assertions TODO
             img_arr = img
             if len(img_arr.shape) < 4 and img_arr.dtype == np.float32 and img_arr.max() <= 1:
-                img_arr = img_arr[None]
+                img_arr = img_arr[None]  # [1, C, H, W]
             else:
                 raise ValueError(f'Input image numpy array needs to be from FluvialDataset class (CHW, normalized), '
                                  f'given image shape: {img_arr.shape}, dtype: {img_arr.dtype}.')
@@ -207,6 +207,13 @@ if __name__ == '__main__':
     mask_save_path = './predicted_mask.png'
 
     perception_infer = PerceptionInfer(engine_path=engine_path)
-    img_arr, pred_mask = perception_infer.infer(img=img_path, mask_path=mask_save_path)
 
+    # Infer from saved image
+    img_arr, pred_mask = perception_infer.infer(img=img_path, mask_path=mask_save_path)
     logger.info(f'Image shape: {img_arr.shape}, Predicted mask shape: {pred_mask.shape}')
+
+    # Infer from random array
+    dummy_img = np.random.rand(3, 128, 128).astype(np.float32)
+    img_arr, pred_mask = perception_infer.infer(img=dummy_img, mask_path=None)
+    print(f'Image shape: {img_arr.shape}, Predicted mask shape: {pred_mask.shape}')
+
