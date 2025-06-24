@@ -2,7 +2,10 @@ from omnisafe.algorithms.hitl.hitl_cade import HitlCade, LossType
 from omnisafe.algorithms.hitl.perception_infer import PerceptionInfer
 
 import os
-from loguru import logger
+import sys
+from loguru import logger as log
+log.remove()
+log.add(sys.stderr, level="INFO")
 
 
 class HitlCadeDeploy:
@@ -18,35 +21,31 @@ class HitlCadeDeploy:
         model_dir: str,
         model_name: str,
         segmentation_engine_path: str,
-        **kwargs
+        loss_type: LossType = 'Indirect',
+        buffer_size: int = 1000,
     ):
         # Initialize the HITL Cade algorithm
         self.hitl_cade = HitlCade(
             model_dir=model_dir,
             model_name=model_name,
+            segmentation_engine_path=segmentation_engine_path,
             eval_episodes=3,
             deterministic=True,
             save_path=os.path.join(model_dir, 'hitl_cade_deploy'),
             save_buffer=True,
-            buffer_size=1000,
+            buffer_size=buffer_size,
             retrain_epoch=3,
-            loss_type='None',  # Need to specify the loss type
+            loss_type=loss_type,
             save_ckpts=True,
             render_mode=None,
             enable_hitl=True,
             enable_retrain=True,
             device='cuda:0',
         )
-        logger.info(f'HITL Cade initialized with model {model_name} from {model_dir}.')
-
-        # Initialize the semantic segmentation engine
-        self.segmentation_engine = PerceptionInfer(engine_path=segmentation_engine_path)
-        logger.info(f'Segmentation engine loaded from {segmentation_engine_path}.')
-
-        # Initialize the communication protocol
+        log.info(f'HITL CADE initialized with model {model_name} from {model_dir}.')
 
     def run(self):
-        pass
+        self.hitl_cade.deploy()
 
 
 if __name__ == "__main__":
@@ -59,7 +58,10 @@ if __name__ == "__main__":
     hitl_cade_deploy = HitlCadeDeploy(
         model_dir=model_dir,
         model_name=model_name,
-        segmentation_engine_path=segmentation_engine_path
+        segmentation_engine_path=segmentation_engine_path,
+        # loss_type='IWR',
+        loss_type='Indirect',
+        buffer_size=10,
     )
 
     # Run the HITL Cade inference
