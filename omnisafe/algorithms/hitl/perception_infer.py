@@ -188,7 +188,8 @@ class PerceptionInfer:
         pred_mask_np = PerceptionInfer.post_process_mask(trt_outputs[1], return_tensor=False)
 
         trt_end_time = time.time()
-        logger.info('Inference finished. Time cost: ', trt_end_time - trt_start_time)
+        trt_infer_duration = trt_end_time - trt_start_time
+        logger.info(f'Inference finished. Time cost: {trt_infer_duration:.3f} seconds.')
 
         # Save mask to image
         if mask_path is not None:
