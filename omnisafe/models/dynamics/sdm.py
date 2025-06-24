@@ -21,6 +21,7 @@ class SemanticDynamicsModel(nn.Module):
                  patch_cols: int = 5,
                  weight_initialization_mode: InitFunction = 'kaiming_uniform',
                  perturb_delta: bool = False,
+                 device: torch.device = torch.device('cuda:0'),
                  ):
         super().__init__()
 
@@ -35,13 +36,16 @@ class SemanticDynamicsModel(nn.Module):
         self._patch_rows: int = patch_rows
         self._patch_cols: int = patch_cols
         self.perturb_delta: bool = perturb_delta
+        self.device: torch.device = device if torch.cuda.is_available() else torch.device('cpu')
+        print(f'SDM using device: {self.device}')
+
         # 4 Corners coordinates for a patchified image
         self._corners_coord: torch.Tensor = torch.Tensor([
             [0, 0],
             [self._patch_rows - 1, 0],
             [self._patch_rows - 1, self._patch_cols - 1],
             [0, self._patch_cols - 1]
-        ])
+        ]).to(self.device)
 
         # Define semantic dynamics model and its optimizer
         self.model = build_mlp_network(
@@ -49,7 +53,7 @@ class SemanticDynamicsModel(nn.Module):
             # sizes=[self._obs_dim + self._act_dim, *self._hidden_sizes, 2],
             activation=self._activation,
             weight_initialization_mode=weight_initialization_mode
-        )
+        ).to(self.device)
 
         # Learnable scaling factors for different movements
         if self.perturb_delta:
