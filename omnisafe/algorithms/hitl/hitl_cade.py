@@ -1,14 +1,19 @@
 import os
+import sys
 import json
 import time
 import csv
 import re
-from loguru import logger
+from datetime import datetime
+import cv2
 import numpy as np
 import pandas as pd
 from typing import Optional, List, Tuple, Dict, Any, Literal, Union, get_args
 from gymnasium.spaces import Discrete, MultiDiscrete, MultiBinary
 import matplotlib.pyplot as plt
+from loguru import logger
+logger.remove()
+logger.add(sys.stderr, level="INFO")
 
 import torch
 import torch.nn.functional as F
@@ -20,6 +25,11 @@ from omnisafe.models.actor_critic import ConstraintActorDynamicsEstimator
 from omnisafe.common.buffer.onpolicy_hitl_buffer import OnPolicyHITLBuffer, save_buffer_to_csv, load_buffer_from_csv
 from omnisafe.utils.math import discount_cumsum, kld_multi_categorical
 from omnisafe.utils.key2action import Key2ActionDrone, Key2ActionBoat
+from omnisafe.utils.patchification import get_patchified_mask
+
+# For real world deployment
+from omnisafe.algorithms.hitl.perception_infer import PerceptionInfer
+from splashdrone4.keyboard_control import KeyboardControl
 
 
 # Types of HITL losses, 'None' means no HITL
@@ -35,6 +45,7 @@ class HitlCade:
         model_dir: str,
         model_name: str,
         env_id: Optional[str] = None,
+        segmentation_engine_path: Optional[str] = None,
         eval_episodes: int = 1,
         deterministic: bool = True,
         save_path: Optional[str] = None,
@@ -93,11 +104,14 @@ class HitlCade:
         # Define stat file path for all eval episodes
         # Stat includes: episodic reward, episodic cost, episodic steps
         if self.save_path is not None:
+            os.makedirs(self.save_path, exist_ok=True)
+
             if 'seed' in self.model_dir:
                 self.seed: str = self.model_dir.split('/')[-1].split('-')[1]
             else:
                 self.seed: str = '000'  # Default seed if not specified in model_dir
             env_name: str = 'real' if self.env_id is None else self.env_id  # 'real' for real-world riverine environment
+            # TODO unify the filenames for sim and real
             stat_file_name: str = f'{env_name}_hitl{self.enable_hitl}_seed{self.seed}_difficulty{self.difficulty}_loss{self.loss_type}.csv'
             self.stat_file_path: str = os.path.join(self.save_path, stat_file_name)
 
@@ -110,12 +124,16 @@ class HitlCade:
             self.env = None
             self.obs_space: OmnisafeSpace = HitlCade.gen_obs_space()
             self.act_space: OmnisafeSpace = HitlCade.gen_act_space()
+            self.keyboard_control = KeyboardControl(save_data=True, data_len=buffer_size, debug=True)
+            self.segmentation_engine = PerceptionInfer(engine_path=segmentation_engine_path)
+            logger.info(f'Segmentation engine loaded from {segmentation_engine_path}.')
 
         # Init the buffer
         self.buffer = OnPolicyHITLBuffer(
             obs_space=self.obs_space,
             act_space=self.act_space,
             size=self.buffer_size,
+            device=self.device,
         )
 
         # Load model configs
@@ -127,11 +145,11 @@ class HitlCade:
 
         # Set nominal (default) action
         assert isinstance(self.act_space, MultiDiscrete)
-        self.nominal_action = torch.tensor([[1] * self.act_space.nvec.shape[0]])
+        self.nominal_action = torch.tensor([[1] * self.act_space.nvec.shape[0]]).to(self.device)
         logger.info(f'Nominal action: {self.nominal_action}')
 
-        # Set human-in-the-loop interruption
-        if self.enable_hitl:
+        # Set human-in-the-loop interruption for simulation
+        if self.enable_hitl and self.env is not None:
             self.k2a = Key2ActionDrone()  # TODO only support drone for now
             logger.info(f'Human-in-the-loop keyboard interruption is enabled.')
 
@@ -144,6 +162,11 @@ class HitlCade:
         return MultiDiscrete([3, 3, 3, 3])
 
     def setup_env(self):
+        """
+        Setup simulation environment.
+        Returns:
+
+        """
         assert self.env_id is not None, 'Environment ID must be specified to setup the environment.'
 
         # Lazy import when env_id is not None
@@ -213,6 +236,11 @@ class HitlCade:
 
         cade = cade.to(self.device)
 
+        # check if all submodules of CADE are on correct device
+        for name, param in cade.named_parameters():
+            assert param.device == torch.device(self.device), \
+                f'Parameter {name} is on {param.device}, expected {self.device}'
+
         return cade
 
     def save_model(self, name: str) -> None:
@@ -231,7 +259,28 @@ class HitlCade:
 
         torch.save({'actor_critic': self.cade.state_dict()}, model_path)  # TODO might need to change the name here
 
-    def save_to_file(
+    def save_checkpoint(self):
+        """
+        Save current checkpoint with the name.
+
+        Returns:
+
+        """
+        if not self.save_ckpts:
+            logger.warning('save_checkpoint should be enabled when initializing HITL CADE.')
+            return
+
+        if self.env is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ckpt_name: str = f'real-episode-{self.ep_num:03}-hitl-{self.enable_hitl}-loss-{self.loss_type}-{timestamp}.pt'
+        else:
+            ckpt_name: str = f'sim-episode-{self.ep_num:03}-hitl-{self.enable_hitl}-loss-{self.loss_type}.pt'
+
+        self.save_model(name=ckpt_name)
+
+        logger.info(f'Checkpoint is saved as {ckpt_name}.')
+
+    def save_ep_stats_to_file(
         self,
         ep_rew: float,
         ep_cost: float,
@@ -250,7 +299,8 @@ class HitlCade:
         Returns:
             None
         """
-        assert self.save_path is not None
+        assert self.save_path is not None, f'Episodic stats save path should not be None.'
+        assert self.env is not None, f'Episodic stats are only savable in simulation.'
 
         if not os.path.exists(self.stat_file_path) or overwrite:
             with open(self.stat_file_path, 'w', newline="") as file:
@@ -262,6 +312,22 @@ class HitlCade:
                 writer = csv.writer(file)
                 writer.writerow([ep_rew, ep_cost, ep_steps])
 
+    def save_buffer_to_file(self):
+        if not self.save_buffer:
+            logger.warning('Enable save_buffer when initializing HITL CADE.')
+            return
+
+        if self.env is None:  # Real world
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename: str = f'real_hitl{self.enable_hitl}_loss{self.loss_type}_episode{self.ep_num:03}_{timestamp}.csv'
+        else:  # Simulation
+            filename: str = f'{self.env_id}_hitl{self.enable_hitl}_loss{self.loss_type}_episode{self.ep_num:03}.csv'
+
+        filename = os.path.join(self.save_path, filename)
+        data = self.buffer.get(reset=False)  # don't reset here, reset after retraining
+        save_buffer_to_csv(data=data, filename=filename)
+        logger.info(f'Buffer data of episode {self.ep_num} is saved to {filename}.')
+
     def close(self) -> None:
         """
         Close the environment, optionally close keyboard reader.
@@ -272,17 +338,53 @@ class HitlCade:
         if self.env is not None:
             self.env.close()
 
-        if self.enable_hitl:
-            self.k2a.listener.stop()
+            if self.enable_hitl:
+                self.k2a.listener.stop()
+
+    def img2obs(self, img: np.ndarray, show_mask: bool = False) -> torch.Tensor:
+        """
+        Convert rgb image to binary water mask via trained semantic segmentation model (tensorrt),
+        then convert to observation tensor, which is flattened patchified water mask.
+
+        Args:
+            img: Input image in numpy array format with shape [H, W, C].
+
+        Returns:
+            obs: Observation tensor with shape [1, 16 x 16].
+        """
+        assert img.ndim == 3, f'Image must be a 3D array, got {img.ndim}D.'
+
+        img = img.transpose((2, 0, 1)).astype(np.float32) / 255  # Normalize image to [0, 1]
+
+        _, mask = self.segmentation_engine.infer(img, mask_path=None)
+
+        if show_mask:
+            cv2.imshow('Mask', mask)
+            cv2.waitKey(1)
+
+        obs = get_patchified_mask(
+            mask=mask,
+            is_uint8=True,
+            patch_size_x=8,
+            patch_size_y=8,
+            patch_step=8,
+            binary_threshold=0.5,
+            patch_threshold=0.5,
+        )
+        obs = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)  # [1, W x H]
+
+        return obs
 
     def evaluate(self) -> Tuple[List[float], List[float]]:
         """
+        Note: this function should ONLY be called in simulation.
         Evaluate the loaded policy, optionally retrain it while inferencing if human corrections are available.
 
         Returns:
             Tuple of per-episode reward list and per-episode cost list.
         """
-        obs, info = self.env.reset()  # TODO Check env None
+        assert self.env is not None
+        obs, info = self.env.reset()
 
         latent = None
         ep_rew_list: List[float] = []  # per-episode reward return
@@ -370,7 +472,7 @@ class HitlCade:
 
                     # Save per-episode stats to file
                     if self.save_path is not None:
-                        self.save_to_file(
+                        self.save_ep_stats_to_file(
                             ep_rew=ep_rew,
                             ep_cost=ep_cost,
                             ep_steps=step,
@@ -379,11 +481,7 @@ class HitlCade:
 
                     # Save per-step episodic stats to file
                     if self.save_buffer:
-                        filename: str = f'{self.env_id}_hitl{self.enable_hitl}_seed{self.seed}_difficulty{self.difficulty}_loss{self.loss_type}_episode{self.ep_num}.csv'
-                        filename = os.path.join(self.save_path, filename)
-                        data = self.buffer.get(reset=False)  # don't reset here, reset after retraining
-                        save_buffer_to_csv(data=data, filename=filename)
-                        logger.info(f'Buffer data of episode {self.ep_num} is saved to {filename}.')
+                        self.save_buffer_to_file()
 
                     # Update stats
                     ep_rew_list.append(ep_rew)
@@ -421,6 +519,7 @@ class HitlCade:
 
     def deploy(self):
         """
+        Note: this function should ONLY be called in real world deployment.
         Deploy the HITL CADE algorithm for human-in-the-loop evaluation and improvement.
 
         Returns:
@@ -428,8 +527,86 @@ class HitlCade:
         """
         assert self.env is None, 'Deploy mode does not support environment interaction.'
 
+        latent = None
+        step: int = 0
+        last_action = self.nominal_action.clone()
 
+        try:
+            # Main loop
+            while True:
+                img, ep_reset, g2g, overlaid, action_taken = self.keyboard_control.step(action=None)
 
+                # Wait for human approval that current observation is stable for policy inference
+                while not g2g:
+                    logger.debug('Waiting for good-to-go signal from human ...')
+                    img, ep_reset, g2g, overlaid, action_taken = self.keyboard_control.step(action=None)
+
+                # Let policy do inference if good to go
+                obs = self.img2obs(img, show_mask=True)
+                agent_act, logp, act_overlaid_policy, reward_pred, cost_pred, latent = self.cade.step(
+                    obs=obs,
+                    last_act=last_action,
+                    lagrangian_multiplier=1.0,  # equally weigh reward and cost
+                    latent=latent,
+                    deterministic=self.deterministic,
+                    enable_safety_layer=False,  # TODO enable this for human demonstration
+                    safety_layer_use_reward=False,
+                )
+
+                # Wait for human approval or correction of policy-chosen action, blocking call
+                img, ep_reset, g2g, overlaid, act = self.keyboard_control.step(action=agent_act[0].cpu().tolist())
+                act = torch.tensor(act).unsqueeze(0).to(self.device)  # [1, 4]
+                logger.info(f'Episode {self.ep_num} Step {step}: Action {act.cpu().tolist()}')
+
+                # Step SDM and update cost_pred
+                next_obs_pred = self.cade.sdm.predict(torch.cat([obs, act], dim=-1), round_to_int=True)
+                with torch.no_grad():
+                    cost_pred = self.cade.cost_critic(next_obs_pred)[0]  # only use the first cost critic
+
+                # Save to buffer
+                self.buffer.store(
+                    obs=obs.squeeze(),
+                    act=act.squeeze(),
+                    act_agent=agent_act.squeeze(),
+                    logp=logp,
+                    act_overlaid=torch.tensor(overlaid, dtype=torch.float32),
+                    # reward=torch.tensor(0.),  # Not available in real world
+                    reward_pred=reward_pred,
+                    # cost=torch.tensor(0.),  # Not available in real world
+                    cost_pred=cost_pred,
+                    done=ep_reset,
+                    # next_obs=next_obs,  # Not available until the next step in real world
+                    next_obs_pred=next_obs_pred,
+                )
+
+                if ep_reset or self.buffer.full():  # Episode terminated by human
+                    logger.info(f'Episode {self.ep_num} terminated with {step} steps.')
+
+                    latent = None
+                    last_action.copy_(self.nominal_action)
+                    step = 0
+
+                    # Save per-step episodic stats to file
+                    if self.save_buffer:
+                        self.save_buffer_to_file()
+
+                    # Retrain CADE
+                    if self.enable_hitl and self.enable_retrain:
+                        data = self.buffer.get()
+                        self.retrain(data=data, epoch=self.retrain_epoch)
+
+                    self.ep_num += 1
+
+                    # Clear the buffer
+                    self.buffer.clear()  # TODO Might allow buffer to store multiple episodes data?
+                else:  # Episode not terminated, continue navigation
+                    step += 1
+        except KeyboardInterrupt:
+            print(f'Program interrupted by user.')
+        except Exception as e:
+            print(f'Unexpected error occurred: {e}.')
+        finally:
+            self.keyboard_control.close()
 
     def retrain(
         self,
@@ -454,12 +631,26 @@ class HitlCade:
         logp = data['logp']  # logp of agent actions
         done = data['done'].bool()
 
-        # Filter out done data samples (usually end of an episode)
-        obs = obs[~done]
-        act = act[~done]
-        act_agent = act_agent[~done]
-        act_overlaid = act_overlaid[~done]
-        logp = logp[~done]
+        # Filter out done data samples (usually end of an episode in simulation)
+        if self.env is not None:
+            obs = obs[~done]
+            act = act[~done]
+            act_agent = act_agent[~done]
+            act_overlaid = act_overlaid[~done]
+            logp = logp[~done]
+
+        # Update SDM in real world (no need to train in sim since sdm already converged)
+        if self.env is None:
+            obs_cur = obs[:-1]
+            act_cur = act[:-1]
+            obs_next = obs[1:]
+            self.update_sdm(obs=obs_cur, act=act_cur, next_obs=obs_next)
+            logger.info('SDM retraining is done.')
+
+        # Check if there are any human corrections
+        if not act_overlaid.any():
+            logger.info(f'No human corrections in episode {self.ep_num}, skipping policy retraining.')
+            return
 
         # Get initial policy and reward prediction (before epoch 0)
         with torch.no_grad():
@@ -480,6 +671,7 @@ class HitlCade:
                 reward_loss = self.calc_reward_estimator_loss(obs, act, act_agent, act_overlaid)
                 reward_loss.backward()
                 self.cade.reward_critic_optimizer.step()
+                logger.info('Training of reward estimator is done.')
 
                 # Then update policy using the learned reward as advantage
                 distribution, reward_pred = self.cade.forward_actor_reward(obs, act)
@@ -507,10 +699,7 @@ class HitlCade:
 
         logger.info(f'Retraining for episode {self.ep_num} of loss {self.loss_type} for {epoch} epochs is done.')
 
-        if self.save_ckpts:
-            ckpt_name: str = f'episode-{self.ep_num:03}-hitl-{self.enable_hitl}-loss-{self.loss_type}.pt'
-            self.save_model(name=ckpt_name)
-            logger.info(f'Checkpoint is saved as {ckpt_name}.')
+        self.save_checkpoint()
 
     def calc_reward_estimator_loss(
         self,
@@ -533,9 +722,6 @@ class HitlCade:
         """
         total_loss = torch.tensor(0.0, dtype=torch.float32, device=act.device)
 
-        _, reward_pred_actual = self.cade.forward_actor_reward(obs, act)
-        _, reward_pred_intended = self.cade.forward_actor_reward(obs, act_agent)
-
         # Filter human intervened samples
         filtered = self.filter([],  # no policy distribution needed for reward loss
                                act,
@@ -543,6 +729,9 @@ class HitlCade:
                                act_overlaid)
         if filtered is None:
             return total_loss
+
+        _, reward_pred_actual = self.cade.forward_actor_reward(obs, act)
+        _, reward_pred_intended = self.cade.forward_actor_reward(obs, act_agent)
 
         *_, final_mask = filtered
 
@@ -571,7 +760,6 @@ class HitlCade:
         Returns:
 
         """
-
         mean, std = torch.mean(reward_pred), torch.std(reward_pred)
         adv = (reward_pred - mean) / (std + 1e-8)
         return adv
@@ -637,6 +825,35 @@ class HitlCade:
         ]
 
         return filtered_policy_distributions, filtered_act, filtered_act_agent, final_mask
+
+    def update_sdm(
+        self,
+        obs: torch.Tensor,
+        act: torch.Tensor,
+        next_obs: torch.Tensor,
+    ) -> None:
+        """
+        Update Semantic Dynamics Model in CADE.
+        Args:
+            obs: Current observation.
+            act: Action taken at current observation.
+            next_obs: The next observation after taken act.
+
+        Returns:
+
+        """
+        # Concat obs and act
+        obs_act = torch.cat((obs, act), dim=-1)
+
+        # Forward pass
+        delta = self.cade.sdm(obs_act)
+
+        # Calculate loss
+        # loss = self._actor_critic.sdm.loss_l1(obs, act, delta, next_obs)
+        loss = self.cade.sdm.loss_iou(obs, act, delta, next_obs)
+
+        # Backpropagate
+        self.cade.sdm.backprop(loss)
 
     def policy_loss_by_hitl_reward(
         self,
