@@ -124,7 +124,11 @@ class HitlCade:
             self.env = None
             self.obs_space: OmnisafeSpace = HitlCade.gen_obs_space()
             self.act_space: OmnisafeSpace = HitlCade.gen_act_space()
+
+            # Init keyboard controller of Splashdrone4
             self.keyboard_control = KeyboardControl(save_data=True, data_len=buffer_size, debug=True)
+
+            # Init semantic segmentation inference engine
             self.segmentation_engine = PerceptionInfer(engine_path=segmentation_engine_path)
             logger.info(f'Segmentation engine loaded from {segmentation_engine_path}.')
 
@@ -341,7 +345,7 @@ class HitlCade:
             if self.enable_hitl:
                 self.k2a.listener.stop()
 
-    def img2obs(self, img: np.ndarray, show_mask: bool = False) -> torch.Tensor:
+    def img2obs(self, img: np.ndarray, show_mask: bool = False) -> Tuple[torch.Tensor, np.ndarray]:
         """
         Convert rgb image to binary water mask via trained semantic segmentation model (tensorrt),
         then convert to observation tensor, which is flattened patchified water mask.
@@ -373,7 +377,7 @@ class HitlCade:
         )
         obs = torch.tensor(obs, dtype=torch.float32).unsqueeze(0).to(self.device)  # [1, W x H]
 
-        return obs
+        return obs, mask
 
     def evaluate(self) -> Tuple[List[float], List[float]]:
         """
@@ -534,15 +538,15 @@ class HitlCade:
         try:
             # Main loop
             while True:
-                img, ep_reset, g2g, overlaid, action_taken = self.keyboard_control.step(action=None)
+                img, wp_yaw, ep_reset, g2g, overlaid, action_taken = self.keyboard_control.step(action=None)
 
                 # Wait for human approval that current observation is stable for policy inference
                 while not g2g:
                     logger.debug('Waiting for good-to-go signal from human ...')
-                    img, ep_reset, g2g, overlaid, action_taken = self.keyboard_control.step(action=None)
+                    img, wp_yaw, ep_reset, g2g, overlaid, action_taken = self.keyboard_control.step(action=None)
 
                 # Let policy do inference if good to go
-                obs = self.img2obs(img, show_mask=True)
+                obs, mask = self.img2obs(img, show_mask=True)
                 agent_act, logp, act_overlaid_policy, reward_pred, cost_pred, latent = self.cade.step(
                     obs=obs,
                     last_act=last_action,
@@ -554,7 +558,16 @@ class HitlCade:
                 )
 
                 # Wait for human approval or correction of policy-chosen action, blocking call
-                img, ep_reset, g2g, overlaid, act = self.keyboard_control.step(action=agent_act[0].cpu().tolist())
+                _, _, ep_reset, g2g, overlaid, act = self.keyboard_control.step(action=agent_act[0].cpu().tolist())
+
+                # Log data to h5 file
+                self.keyboard_control.log_data(
+                    image=img,
+                    mask=mask,
+                    action=np.array(act),
+                    overlaid=overlaid,
+                )
+
                 act = torch.tensor(act).unsqueeze(0).to(self.device)  # [1, 4]
                 logger.info(f'Episode {self.ep_num} Step {step}: Action {act.cpu().tolist()}')
 
