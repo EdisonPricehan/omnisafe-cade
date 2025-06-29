@@ -562,6 +562,7 @@ class HitlCade:
 
                 # Log data to h5 file
                 self.keyboard_control.log_data(
+                    wp_yaw=wp_yaw,
                     image=img,
                     mask=mask,
                     action=np.array(act),
