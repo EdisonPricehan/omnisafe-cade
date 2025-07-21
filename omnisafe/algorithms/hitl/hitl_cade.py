@@ -67,6 +67,7 @@ class HitlCade:
             env_id: environment id. For Safe Riverine Environment, choose from {easy, medium, hard}.
             model_dir: model directory containing the CADE pytorch model, which is under the torch_save dir.
             model_name: exact model name that has "pt" suffix.
+            segmentation_engine_path: path to the semantic segmentation inference engine, e.g., tensorrt model.
             eval_episodes: number of episodes to evaluate the loaded CADE model.
             deterministic: whether to use deterministic policy or not.
             save_path: folder to store the episodic statistics of evaluation results.
