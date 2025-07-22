@@ -3,6 +3,7 @@ from omnisafe.algorithms.hitl.perception_infer import PerceptionInfer
 
 import os
 import sys
+from typing import Optional
 from loguru import logger as log
 log.remove()
 log.add(sys.stderr, level="INFO")
@@ -20,7 +21,7 @@ class HitlCadeDeploy:
         self,
         model_dir: str,
         model_name: str,
-        segmentation_engine_path: str,
+        segmentation_engine_path: Optional[str] = None,
         loss_type: LossType = 'Indirect',
         buffer_size: int = 1000,
     ):
@@ -41,6 +42,7 @@ class HitlCadeDeploy:
             enable_hitl=True,
             enable_retrain=True,
             device='cuda:0',
+            debug=False,
         )
         log.info(f'HITL CADE initialized with model {model_name} from {model_dir}.')
 
@@ -58,7 +60,7 @@ if __name__ == "__main__":
     hitl_cade_deploy = HitlCadeDeploy(
         model_dir=model_dir,
         model_name=model_name,
-        segmentation_engine_path=segmentation_engine_path,
+        # segmentation_engine_path=segmentation_engine_path,
         # loss_type='IWR',
         loss_type='Indirect',
         buffer_size=10,

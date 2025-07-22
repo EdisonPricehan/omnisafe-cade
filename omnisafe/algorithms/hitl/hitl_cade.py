@@ -28,7 +28,8 @@ from omnisafe.utils.key2action import Key2ActionDrone, Key2ActionBoat
 from omnisafe.utils.patchification import get_patchified_mask
 
 # For real world deployment
-from omnisafe.algorithms.hitl.perception_infer import PerceptionInfer
+from omnisafe.algorithms.hitl.perception_infer import PerceptionInfer  # Tensorrt inference
+from omnisafe.algorithms.hitl.sam2_infer import Sam2Infer  # SAM2 inference
 from splashdrone4.keyboard_control import KeyboardControl
 
 
@@ -58,7 +59,8 @@ class HitlCade:
         render_mode: Optional[str] = 'human',
         enable_hitl: bool = True,
         enable_retrain: bool = True,
-        device: Union[torch.device, str] = 'cpu'  # Device to run the model on, e.g., 'cuda:0' or 'cpu'
+        device: Union[torch.device, str] = 'cpu',  # Device to run the model on, e.g., 'cuda:0' or 'cpu'
+        debug: bool = False,
     ):
         """
         Human-in-the-loop Constrained Actor Dynamics Estimator (HITL-CADE) evaluation and improvement process.
@@ -67,6 +69,7 @@ class HitlCade:
             env_id: environment id. For Safe Riverine Environment, choose from {easy, medium, hard}.
             model_dir: model directory containing the CADE pytorch model, which is under the torch_save dir.
             model_name: exact model name that has "pt" suffix.
+            segmentation_engine_path: path to the segmentation engine, can be None for SAM2 inference.
             eval_episodes: number of episodes to evaluate the loaded CADE model.
             deterministic: whether to use deterministic policy or not.
             save_path: folder to store the episodic statistics of evaluation results.
@@ -79,11 +82,14 @@ class HitlCade:
             render_mode: render mode of the environment.
             enable_hitl: Whether to enable human-in-the-loop during evaluation.
             enable_retrain: Whether to enable retraining of CADE during evaluation.
+            device: Device to run the model on, e.g., 'cuda:0' or 'cpu'.
+            debug: Whether to enable debug mode, which checks real world GPS signal in keyboard control.
         """
         # Init parameters
         self.env_id: Optional[str] = env_id
         self.model_dir: str = model_dir
         self.model_name: str = model_name
+        self.seg_eng_path: str = segmentation_engine_path
         self.eval_episodes: int = eval_episodes
         self.deterministic: bool = deterministic
         self.save_path: Optional[str] = save_path
@@ -97,6 +103,7 @@ class HitlCade:
         self.enable_hitl: bool = enable_hitl
         self.enable_retrain: bool = enable_retrain
         self.device: Union[torch.device, str] = device
+        self.debug: bool = debug
 
         # Variables
         self.ep_num: int = 0
@@ -126,11 +133,15 @@ class HitlCade:
             self.act_space: OmnisafeSpace = HitlCade.gen_act_space()
 
             # Init keyboard controller of Splashdrone4
-            self.keyboard_control = KeyboardControl(save_data=True, data_len=buffer_size, debug=True)
+            self.keyboard_control = KeyboardControl(save_data=True, data_len=buffer_size, debug=self.debug)
 
             # Init semantic segmentation inference engine
-            self.segmentation_engine = PerceptionInfer(engine_path=segmentation_engine_path)
-            logger.info(f'Segmentation engine loaded from {segmentation_engine_path}.')
+            if segmentation_engine_path is None:
+                self.segmentation_engine = Sam2Infer()
+                logger.info(f'Using SAM2 stream inference.')
+            else:
+                self.segmentation_engine = PerceptionInfer(engine_path=segmentation_engine_path)
+                logger.info(f'Segmentation engine loaded from {segmentation_engine_path}.')
 
         # Init the buffer
         self.buffer = OnPolicyHITLBuffer(
@@ -358,11 +369,14 @@ class HitlCade:
         """
         assert img.ndim == 3, f'Image must be a 3D array, got {img.ndim}D.'
 
-        img = img.transpose((2, 0, 1)).astype(np.float32) / 255  # Normalize image to [0, 1]
+        # tensorrt segmentation, otherwise SAM2
+        if self.seg_eng_path is not None:
+            img = img.transpose((2, 0, 1)).astype(np.float32) / 255  # Normalize image to [0, 1]
 
-        _, mask = self.segmentation_engine.infer(img, mask_path=None)
+        image, mask = self.segmentation_engine.infer(img, mask_path=None)
 
         if show_mask:
+            cv2.imshow('Image', image)
             cv2.imshow('Mask', mask)
             cv2.waitKey(1)
 
