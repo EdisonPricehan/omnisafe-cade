@@ -151,7 +151,7 @@ class HitlCade:
             device=self.device,
         )
 
-        # Load model configs
+        # Load model configs (but only algo_cfgs and model_cfgs are used)
         self.cfgs: Config = self.load_cfgs()
 
         # Load model
@@ -610,6 +610,7 @@ class HitlCade:
                 if ep_reset or self.buffer.full():  # Episode terminated by human
                     logger.info(f'Episode {self.ep_num} terminated with {step} steps.')
 
+                    # Reset recursive variables
                     latent = None
                     last_action.copy_(self.nominal_action)
                     step = 0
@@ -768,7 +769,7 @@ class HitlCade:
         filtered_reward_pred_intended = reward_pred_intended[0][final_mask]
 
         # Bradley-Terry loss
-        loss = -torch.log(torch.sigmoid(filtered_reward_pred_actual - filtered_reward_pred_intended + 1e-8)).mean()
+        loss = -torch.log(torch.sigmoid(filtered_reward_pred_actual - filtered_reward_pred_intended)).mean()
 
         return loss
 
