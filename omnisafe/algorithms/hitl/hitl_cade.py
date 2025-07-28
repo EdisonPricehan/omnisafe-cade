@@ -260,7 +260,7 @@ class HitlCade:
 
     def save_model(self, name: str) -> None:
         """
-        Save current CADE model.
+        Save the current CADE model safely to the model path with atomic replace.
 
         Args:
             name: Model name with suffix.
@@ -272,7 +272,18 @@ class HitlCade:
 
         model_path: str = os.path.join(self.model_dir, 'torch_save', name)
 
-        torch.save({'actor_critic': self.cade.state_dict()}, model_path)  # TODO might need to change the name here
+        model_path_tmp = model_path + '.tmp'
+
+        # Save model to a temporary file first
+        torch.save({'actor_critic': self.cade.state_dict()}, model_path_tmp)  # TODO might need to change the name here
+
+        # Force write to disk
+        with open(model_path_tmp, 'rb+') as f:
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Atomic replace
+        os.replace(model_path_tmp, model_path)
 
     def save_checkpoint(self):
         """
