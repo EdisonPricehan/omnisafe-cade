@@ -54,14 +54,15 @@ if __name__ == "__main__":
     # Set constants
     model_dir: str = '../../../examples/models'
     model_name: str = 'epoch-350.pt'
-    segmentation_engine_path: str = '/home/orin-nano/Aerial-Fluvial-Semantic-Segmentation/src/models/unet-resnet34-128x128-fp16.trt'
+    # segmentation_engine_path: str = '/home/orin-nano/Aerial-Fluvial-Semantic-Segmentation/src/models/unet-resnet34-128x128-fp16.trt'
+    segmentation_engine_path = None  # Will use SAM2 for segmentation
     loss_type: LossType = 'Indirect'  # or 'IWR' for Intervention Weighted Regression
 
     # Initialize the HITL Cade deployment
     hitl_cade_deploy = HitlCadeDeploy(
         model_dir=model_dir,
         model_name=model_name,
-        # segmentation_engine_path=segmentation_engine_path,
+        segmentation_engine_path=segmentation_engine_path,
         loss_type=loss_type,
         buffer_size=10,
     )
