@@ -28,8 +28,6 @@ from omnisafe.utils.key2action import Key2ActionDrone, Key2ActionBoat
 from omnisafe.utils.patchification import get_patchified_mask
 
 # For real world deployment
-from omnisafe.algorithms.hitl.perception_infer import PerceptionInfer  # Tensorrt inference
-from omnisafe.algorithms.hitl.sam2_infer import Sam2Infer  # SAM2 inference
 from splashdrone4.keyboard_control import KeyboardControl
 
 
@@ -137,9 +135,11 @@ class HitlCade:
 
             # Init semantic segmentation inference engine
             if segmentation_engine_path is None:
+                from omnisafe.algorithms.hitl.sam2_infer import Sam2Infer  # SAM2 inference
                 self.segmentation_engine = Sam2Infer()
                 logger.info(f'Using SAM2 stream inference.')
             else:
+                from omnisafe.algorithms.hitl.perception_infer import PerceptionInfer  # Tensorrt inference
                 self.segmentation_engine = PerceptionInfer(engine_path=segmentation_engine_path)
                 logger.info(f'Segmentation engine loaded from {segmentation_engine_path}.')
 
@@ -251,10 +251,20 @@ class HitlCade:
 
         cade = cade.to(self.device)
 
-        # check if all submodules of CADE are on correct device
+        # Check if all submodules of CADE are on correct device
         for name, param in cade.named_parameters():
             assert param.device == torch.device(self.device), \
                 f'Parameter {name} is on {param.device}, expected {self.device}'
+        logger.info(f'CADE model parameters are loaded to {self.device}.')
+
+        # Set CADE to training mode
+        cade.train()
+        assert cade.training, f'CADE model should be in training mode, but it is in {cade.training} mode.'
+
+        # Check all parameters of CADE if their requires_grad=True
+        for name, param in cade.named_parameters():
+            assert param.requires_grad == True, f'{name} should have requires_grad=True.'
+        logger.info(f'CADE model parameters are set to require gradients.')
 
         return cade
 
@@ -373,7 +383,7 @@ class HitlCade:
         then convert to observation tensor, which is flattened patchified water mask.
 
         Args:
-            img: Input image in numpy array format with shape [H, W, C].
+            img: Input image in numpy array format with shape [H, W, C], bgr in channel dim.
 
         Returns:
             obs: Observation tensor with shape [1, 16 x 16].
@@ -383,12 +393,18 @@ class HitlCade:
         # tensorrt segmentation, otherwise SAM2
         if self.seg_eng_path is not None:
             img = img.transpose((2, 0, 1)).astype(np.float32) / 255  # Normalize image to [0, 1]
+        else:
+            img = img[:, :, ::-1]  # Convert rgb to bgr for SAM2 inference
 
         image, mask = self.segmentation_engine.infer(img, mask_path=None)
+        # image shape: [1, C, H, W], channel order is the same as img; mask shape: [H, W]
+
+        if self.seg_eng_path is not None:  # tensorrt inference
+            image = image[0].transpose((1, 2, 0))  # [1, C, H, W] to [H, W, C]
 
         if show_mask:
-            cv2.imshow('Image', image)
-            cv2.imshow('Mask', mask)
+            cv2.imshow('Decision Time Image', image)
+            cv2.imshow('Decision Time Mask', mask)
             cv2.waitKey(1)
 
         obs = get_patchified_mask(
@@ -632,8 +648,10 @@ class HitlCade:
 
                     # Retrain CADE
                     if self.enable_hitl and self.enable_retrain:
+                        logger.info(f'Retraining CADE for episode {self.ep_num} ...')
                         data = self.buffer.get()
                         self.retrain(data=data, epoch=self.retrain_epoch)
+                        logger.info(f'Retraining CADE for episode {self.ep_num} is done.')
 
                     self.ep_num += 1
 
@@ -684,6 +702,7 @@ class HitlCade:
             obs_cur = obs[:-1]
             act_cur = act[:-1]
             obs_next = obs[1:]
+            logger.info('Retraining SDM in real world ...')
             self.update_sdm(obs=obs_cur, act=act_cur, next_obs=obs_next)
             logger.info('SDM retraining is done.')
 
@@ -692,12 +711,14 @@ class HitlCade:
             logger.info(f'No human corrections in episode {self.ep_num}, skipping policy retraining.')
             return
 
+        # Print the number of human corrections
+        num_human_corrections = act_overlaid.sum().item()
+        logger.info(f'Number of human corrections in episode {self.ep_num}: {int(num_human_corrections)}')
+
         # Get initial policy and reward prediction (before epoch 0)
         with torch.no_grad():
             init_distribution, init_reward_pred = self.cade.forward_actor_reward(obs, act)
         assert isinstance(init_distribution, List), f'Currently only support multi-discrete action space.'
-
-        logger.info(f'Starting retraining for episode {self.ep_num} ...')
 
         for e in range(epoch if epoch is not None else self.retrain_epoch):
             # Zero gradients
@@ -880,7 +901,7 @@ class HitlCade:
             next_obs: The next observation after taken act.
 
         Returns:
-
+            None
         """
         # Concat obs and act
         obs_act = torch.cat((obs, act), dim=-1)
@@ -1442,7 +1463,7 @@ if __name__ == '__main__':
     evaluate: bool = False  # Whether evaluate the trained policy or test the retrain function
     evaluate_single: bool = False  # Whether evaluate single CADE model or multiple CADE models
     retrain_single: bool = False  # Whether retrain from single episodes or multiple episodes (integral retrain)
-    plot_comp: bool = True  # Whether plot statistic comparisons
+    plot_comp: bool = False  # Whether plot statistic comparisons
 
     if evaluate:
         if evaluate_single:
