@@ -1,5 +1,4 @@
 from omnisafe.algorithms.hitl.hitl_cade import HitlCade, LossType
-from omnisafe.algorithms.hitl.perception_infer import PerceptionInfer
 
 import os
 import sys
@@ -52,7 +51,7 @@ class HitlCadeDeploy:
 
 if __name__ == "__main__":
     # Set constants
-    model_dir: str = '../../../examples/models'
+    model_dir: str = '/home/orin-nano/omnisafe-cade/examples/models'
     model_name: str = 'epoch-350.pt'
     # segmentation_engine_path: str = '/home/orin-nano/Aerial-Fluvial-Semantic-Segmentation/src/models/unet-resnet34-128x128-fp16.trt'
     segmentation_engine_path = None  # Will use SAM2 for segmentation
