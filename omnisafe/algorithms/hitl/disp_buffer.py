@@ -10,6 +10,7 @@ import os
 import glob
 import csv
 import ast
+import json
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -18,6 +19,10 @@ import seaborn as sns
 from typing import List, Dict, Any, Optional, Tuple
 import torch
 import re
+
+from omnisafe.utils.config import Config
+from omnisafe.models.actor_critic import ConstraintActorDynamicsEstimator
+from omnisafe.algorithms.hitl.hitl_cade import HitlCade
 
 
 class HITLDisplayBuffer:
@@ -34,9 +39,51 @@ class HITLDisplayBuffer:
         self.episodes_data = []
         self.policy_dir = policy_dir
 
+        # CADE model initialization
+        self.config_dir = 'examples/models'
+        self.cfgs: Config = self._load_cfgs()
+        self.obs_space = HitlCade.gen_obs_space()
+        self.act_space = HitlCade.gen_act_space()
+        self.cade = self._init_cade_model()
+
         # Set style
         plt.style.use('seaborn-v0_8')
         sns.set_palette("husl")
+
+    def _load_cfgs(self) -> Config:
+        """
+        Load the config from the save directory.
+
+        Raises:
+            FileNotFoundError: If the config file is not found.
+        """
+        cfg_path = os.path.join(self.config_dir, 'config.json')
+        try:
+            with open(cfg_path, encoding='utf-8') as file:
+                kwargs = json.load(file)
+        except FileNotFoundError as error:
+            raise FileNotFoundError(
+                f'The config file is not found in the save directory {self.config_dir}.',
+            ) from error
+        return Config.dict2config(kwargs)
+
+    def _init_cade_model(self) -> ConstraintActorDynamicsEstimator:
+        """
+        Initialize the Constraint Actor Dynamics Estimator (CADE) model.
+
+        Returns:
+            CADE model instance on CPU in evaluation mode.
+        """
+        cade: ConstraintActorDynamicsEstimator = ConstraintActorDynamicsEstimator(
+            obs_space=self.obs_space,
+            act_space=self.act_space,
+            model_cfgs=self.cfgs.model_cfgs,
+            epochs=1,  # Not used, for linear lr decay
+        ).to('cpu')
+
+        cade.eval()
+
+        return cade
 
     def read_csv_files(self, directory_path: str) -> None:
         """Read all CSV files from the given directory.
@@ -315,10 +362,7 @@ class HITLDisplayBuffer:
             except Exception as e:
                 print(f"Could not load policy estimates for episode {episode_num}: {e}")
         else:
-            if episode_num == 0:
-                print(f"No policy file found for episode {episode_num} (expected - episode 0 missing)")
-            else:
-                print(f"No policy file found for episode {episode_num}")
+            print(f"No policy file found for episode {episode_num}")
 
         # Check overlay status for each step
         overlay_status = []
@@ -333,32 +377,30 @@ class HITLDisplayBuffer:
         fig.suptitle(f"Episode Summary: {episode['filename']}", fontsize=16, fontweight='bold')
 
         # Reward over time with policy comparison
-        axes[0, 0].plot(steps, rewards, 'o-', label='Actual Reward', color='#FF6B6B', linewidth=2)
-        axes[0, 0].plot(steps, reward_preds_original, 's--', label='Original Prediction', color='#FFB6C1', alpha=0.7)
+        axes[0, 0].plot(steps, reward_preds_original, 's-', label='Original Prediction', color='#FF6B6B', linewidth=2)
 
         if policy_comparison_available:
-            axes[0, 0].plot(steps, reward_preds_updated, '^:', label='Updated Prediction', color='#FF8C42', alpha=0.8, linewidth=2)
-            axes[0, 0].set_title('Reward Over Time (Policy Comparison)', fontweight='bold')
+            axes[0, 0].plot(steps, reward_preds_updated, '^-', label='Updated Prediction', color='#FF8C42', linewidth=2)
+            axes[0, 0].set_title('Reward Predictions Over Time (Before vs After Retrain)', fontweight='bold')
         else:
-            axes[0, 0].set_title('Reward Over Time (Original Only)', fontweight='bold')
+            axes[0, 0].set_title('Reward Predictions Over Time', fontweight='bold')
 
         axes[0, 0].set_xlabel('Step')
-        axes[0, 0].set_ylabel('Reward')
+        axes[0, 0].set_ylabel('Predicted Reward')
         axes[0, 0].legend()
         axes[0, 0].grid(True, alpha=0.3)
 
         # Cost over time with policy comparison
-        axes[0, 1].plot(steps, costs, 'o-', label='Actual Cost', color='#4ECDC4', linewidth=2)
-        axes[0, 1].plot(steps, cost_preds_original, 's--', label='Original Prediction', color='#B2DFDB', alpha=0.7)
+        axes[0, 1].plot(steps, cost_preds_original, 's-', label='Original Prediction', color='#4ECDC4', linewidth=2)
 
         if policy_comparison_available:
-            axes[0, 1].plot(steps, cost_preds_updated, '^:', label='Updated Prediction', color='#45B7D1', alpha=0.8, linewidth=2)
-            axes[0, 1].set_title('Cost Over Time (Policy Comparison)', fontweight='bold')
+            axes[0, 1].plot(steps, cost_preds_updated, '^-', label='Updated Prediction', color='#45B7D1', linewidth=2)
+            axes[0, 1].set_title('Cost Predictions Over Time (Before vs After Retrain)', fontweight='bold')
         else:
-            axes[0, 1].set_title('Cost Over Time (Original Only)', fontweight='bold')
+            axes[0, 1].set_title('Cost Predictions Over Time', fontweight='bold')
 
         axes[0, 1].set_xlabel('Step')
-        axes[0, 1].set_ylabel('Cost')
+        axes[0, 1].set_ylabel('Predicted Cost')
         axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3)
 
@@ -752,12 +794,11 @@ class HITLDisplayBuffer:
             print(f"DEBUG: No match found for pattern 'episode(\\d+)' in '{filename}', returning 0")
             return 0  # Default to 0 if no match found
 
-    def _find_policy_file(self, episode_num: int, session_type: str = 'upstream') -> Optional[str]:
+    def _find_policy_file(self, episode_num: int) -> Optional[str]:
         """Find the corresponding policy file for an episode.
 
         Args:
             episode_num: Episode number
-            session_type: 'upstream' or 'downstream'
 
         Returns:
             Path to policy file or None if not found
@@ -765,20 +806,19 @@ class HITLDisplayBuffer:
         if not self.policy_dir:
             return None
 
-        policy_subdir = os.path.join(self.policy_dir, session_type)
-        if not os.path.exists(policy_subdir):
-            return None
-
         # Look for policy file with matching episode number
         pattern = f"real-episode-{episode_num:03d}-*.pt"
-        policy_files = glob.glob(os.path.join(policy_subdir, pattern))
+        policy_files = glob.glob(os.path.join(self.policy_dir, pattern))
 
         if policy_files:
             return policy_files[0]  # Return first match
         return None
 
-    def _load_policy_and_get_estimates(self, episode_data: List[Dict[str, Any]],
-                                     policy_path: str) -> Tuple[List[float], List[float]]:
+    def _load_policy_and_get_estimates(
+        self,
+        episode_data: List[Dict[str, Any]],
+        policy_path: str,
+    ) -> Tuple[List[float], List[float]]:
         """Load policy and get updated reward/cost estimates.
 
         Args:
@@ -802,15 +842,19 @@ class HITLDisplayBuffer:
 
             print(f"Policy file size: {file_size / (1024*1024):.2f} MB")
 
-            # Try to load with better error handling
+            # Force CPU device for consistent inference
+            device = torch.device('cpu')
+
+            # Try to load with better error handling - force map to CPU
             try:
-                model_params = torch.load(policy_path, map_location='cpu', weights_only=False)
+                model_params = torch.load(policy_path, map_location=device, weights_only=False)
+                print("Successfully loaded model parameters to CPU")
             except Exception as torch_error:
                 print(f"PyTorch load error: {torch_error}")
                 # Try with different loading options
                 try:
                     print("Attempting alternative loading method...")
-                    model_params = torch.load(policy_path, map_location='cpu', pickle_module=None)
+                    model_params = torch.load(policy_path, map_location=device, pickle_module=None)
                 except Exception as alt_error:
                     raise ValueError(f"Failed to load model with both methods. Original error: {torch_error}, Alternative error: {alt_error}")
 
@@ -819,17 +863,82 @@ class HITLDisplayBuffer:
                 available_keys = list(model_params.keys()) if isinstance(model_params, dict) else "Not a dictionary"
                 raise KeyError(f"'actor_critic' key not found in model_params. Available keys: {available_keys}")
 
-            # Check if we have the necessary config from the original HITL CADE
-            # For now, we'll skip the complex model recreation and return original predictions with a warning
-            print("WARNING: Policy comparison requires proper configuration from original training.")
-            print("Falling back to original predictions for now.")
-            print("To enable policy comparison, the model configuration from training needs to be saved alongside the model.")
+            # Load params to CADE model
+            try:
+                self.cade.load_state_dict(model_params['actor_critic'])
+                print("Successfully loaded policy parameters into CADE model")
+            except RuntimeError as e:
+                if "sdm._corners_coord" in str(e):
+                    print("Warning: Model was saved before _corners_coord was registered as buffer. Loading with strict=False...")
+                    # Load with strict=False to ignore missing buffers
+                    missing_keys, unexpected_keys = self.cade.load_state_dict(model_params['actor_critic'], strict=False)
+                    print(f"Missing keys: {missing_keys}")
+                    print(f"Unexpected keys: {unexpected_keys}")
 
-            # Return original predictions since we can't safely load without proper config
-            original_rewards = [step.get('reward_pred', 0) for step in episode_data]
-            original_costs = [step.get('cost_pred', 0) for step in episode_data]
-            return original_rewards, original_costs
+                    # The _corners_coord buffer will be initialized with default values from the SDM constructor
+                    print("SDM _corners_coord buffer initialized with default values")
+                else:
+                    # Re-raise the error if it's not about _corners_coord
+                    raise e
 
+            # Ensure CADE model is on CPU before loading state dict
+            self.cade = self.cade.to(device)
+            print(f"CADE model moved to {device}")
+
+            # Verify all model parameters are on the correct device
+            for name, param in self.cade.named_parameters():
+                if param.device != device:
+                    print(f"Warning: Parameter {name} is on {param.device}, moving to {device}")
+                    param.data = param.data.to(device)
+
+            # Initialize lists to store updated predictions
+            updated_reward_preds = []
+            updated_cost_preds = []
+
+            # Initialize latent state and last action for inference - ensure on correct device
+            latent = None
+            last_action = torch.tensor([[1, 1, 1, 1]], dtype=torch.float32, device=device)  # Nominal action (no-op)
+
+            print(f"Running inference on {len(episode_data)} steps...")
+
+            with torch.no_grad():
+                # Run inference on each step of the episode
+                for step_idx, step_data in enumerate(episode_data):
+                    # Get observation and action from episode data
+                    obs = step_data.get('obs')
+                    act = step_data.get('act')  # This is the actual action taken
+
+                    if obs is None or act is None:
+                        print(f"Warning: Missing obs or act at step {step_idx}, using defaults")
+                        updated_reward_preds.append(0.0)
+                        updated_cost_preds.append(0.0)
+                        continue
+
+                    # Convert to tensors and ensure correct shapes and device
+                    obs_tensor = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)  # [1, obs_dim]
+                    act_tensor = torch.tensor(act, dtype=torch.float32, device=device).unsqueeze(0)  # [1, act_dim]
+
+                    # Device check: ensure latent is on correct device if not None
+                    if latent is not None:
+                        latent = latent.to(device)
+
+                    # 1-step prediction using CADE
+                    obs_last_act = torch.cat([obs_tensor, last_action], dim=-1)
+                    gru_output, latent = self.cade.gru(obs_last_act, latent)
+                    reward_pred = self.cade.reward_critic(gru_output, act_tensor)[0]
+                    obs_cur_act = torch.cat([obs_tensor, act_tensor], dim=-1)
+                    next_obs_pred = self.cade.sdm.predict(obs_cur_act, round_to_int=True)
+                    cost_pred = self.cade.cost_critic(next_obs_pred)[0]
+
+                    # Store predictions (convert to float)
+                    updated_reward_preds.append(float(reward_pred.cpu().item()))
+                    updated_cost_preds.append(float(cost_pred.cpu().item()))
+
+                    # Update last_action for next iteration - ensure on correct device
+                    last_action = act_tensor.clone().to(device)
+
+            print(f"Successfully completed inference for {len(episode_data)} steps")
+            return updated_reward_preds, updated_cost_preds
 
         except Exception as e:
             print(f"Error loading policy from {policy_path}: {e}")
@@ -838,6 +947,7 @@ class HITLDisplayBuffer:
             original_rewards = [step.get('reward_pred', 0) for step in episode_data]
             original_costs = [step.get('cost_pred', 0) for step in episode_data]
             return original_rewards, original_costs
+
 
 def main():
     """Main function for command-line usage.
