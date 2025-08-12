@@ -21,6 +21,7 @@ class LatentCategoricalActor(Actor):
 
     LatentCategoricalActor is an actor suitable for discrete action. It is used in
     discrete action space environment such as ``CartPole-v1`` and so on.
+    Riverine Environment is also supported by this actor (since 2025/08).
 
     Args:
         obs_space (OmnisafeSpace): Observation space.
@@ -44,7 +45,7 @@ class LatentCategoricalActor(Actor):
         activation: Activation = 'relu',
         weight_initialization_mode: InitFunction = 'kaiming_uniform',
     ) -> None:
-        assert isinstance(act_space, Discrete), f'Categorical actor only supports categorical action!'
+        assert isinstance(act_space, Discrete), f'Categorical actor only supports categorical action, given {act_space}!'
 
         """Initialize an instance of :class:`CategoricalActor`."""
         super().__init__(obs_space, act_space, hidden_sizes, activation, weight_initialization_mode)
