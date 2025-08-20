@@ -173,6 +173,8 @@ defaults:
     std_range: [0.5, 0.1]
     # Whether disable the no operation action
     disable_no_op: False
+    # Whether the first non no-op action is a win, only 1 axis in a multi-discrete action space will be considered
+    first_non_no_op_win: False
     # actor network configurations
     actor:
       # hidden layer sizes
@@ -257,9 +259,11 @@ medium:
     # number of parallel agent, similar to a3c
     parallel: 1
     # total number of steps to train
+#    total_steps: 1000000
+    total_steps: 500000
 #    total_steps: 400000
 #    total_steps: 300000
-    total_steps: 200000
+#    total_steps: 200000
 #    total_steps: 100000
 #    total_steps: 500
     # maximum number of steps per episode
@@ -287,9 +291,10 @@ medium:
     ep_padding: False
     # target kl divergence
 #    target_kl: 2.0
-    target_kl: 1.0
+#    target_kl: 1.0
 #    target_kl: 0.5
 #    target_kl: 0.25
+    target_kl: 0.02
     # entropy coefficient
     entropy_coef: 0.0
 #    entropy_coef: 0.01
@@ -306,9 +311,10 @@ medium:
     kl_continue_other: True
     # The threshold for KL divergence in each policy update
 #    focops_eta: 2.0
-    focops_eta: 1.0
+#    focops_eta: 1.0
 #    focops_eta: 0.5
 #    focops_eta: 0.25
+    focops_eta: 0.02
     # The hyperparameters related to the greediness of the algorithm
     focops_lam: 1.5
     # use max gradient norm
@@ -333,7 +339,7 @@ medium:
     # clip ratio, not used
     clip: 0.2
 #    clip: 0.5
-    # advantage estimation method, options: gae, retrace
+    # advantage estimation method, options: gae, gae-rtg, vtrace, plain and subm
 #    adv_estimation_method: gae
 #    adv_estimation_method: gae-rtg
 #    adv_estimation_method: vtrace
@@ -344,8 +350,8 @@ medium:
     # standardize cost advantage
     standardized_cost_adv: False
     # episode mean sliding window size
-    ep_ret_window_size: 10
-#    ep_ret_window_size: 20
+#    ep_ret_window_size: 10
+    ep_ret_window_size: 20
 #    ep_ret_window_size: 15
 #    ep_ret_window_size: 30
 #    ep_ret_window_size: 5
@@ -358,7 +364,7 @@ medium:
     # use semantic dynamics model
     use_sdm: True
     # use sdm-based safety layer
-    use_safety_layer: True
+    use_safety_layer: False
     # whether rank sampled actions with tradeoff score of reward and cost
     safety_layer_use_reward: False
     # use episode-wise MPC-informed Lagrangian multiplier update
@@ -368,7 +374,7 @@ medium:
     # use wandb for logging
     use_wandb: True
     # wandb project name
-    wandb_project: cade-sre-medium-terminal-cost-only
+    wandb_project: cade-sre-medium-discrete-action-space
     # use tensorboard for logging
     use_tensorboard: True
     # save model frequency
@@ -383,6 +389,7 @@ medium:
     weight_initialization_mode: "kaiming_uniform"
     # actor type, options: gaussian, gaussian_learning
     actor_type: latent_multi_discrete
+#    actor_type: latent_discrete
     # latent size of shared recurrent (GRU) network
 #    latent_size: 256
 #    latent_size: 128
@@ -403,6 +410,10 @@ medium:
     std_range: [0.5, 0.1]
     # Whether disable the no operation action
     disable_no_op: False
+    # Whether the first non no-op action is a win, only 1 axis in a multi-discrete action space will be considered
+    first_non_no_op_win: True
+    # Whether to block backward action for multi-discrete action space, resulting in [3,3,2,3] action space
+    block_backward_action: True
     # actor network configurations
     actor:
       # hidden layer sizes
