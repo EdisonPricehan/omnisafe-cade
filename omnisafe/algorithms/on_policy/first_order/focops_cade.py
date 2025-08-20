@@ -39,7 +39,10 @@ from omnisafe.utils.episode_dataset import EpisodeDataset
 from omnisafe.models.actor_critic.constraint_actor_critic import ConstraintActorCritic
 from omnisafe.models.actor_critic.constraint_actor_dynamics_estimator import ConstraintActorDynamicsEstimator
 from omnisafe.models.actor.latent_multi_categorical_actor import LatentMultiCategoricalActor
-from omnisafe.utils.math import (get_dist_mean_std, get_multi_dist_mean_std, kld_multi_categorical,
+from omnisafe.utils.math import (get_dist_mean_std,
+                                 get_multi_dist_mean_std,
+                                 kld_multi_categorical,
+                                 kld_multi_categorical_flattened,
                                  logits_from_multi_categorical)
 
 
@@ -243,7 +246,14 @@ class FOCOPS_CADE(PolicyGradient):
 
         # Calculate KLD of current policy from the initial policy that interacted with the environment
         if isinstance(distribution, list):  # Multi-discrete
-            kl = kld_multi_categorical(distribution, self._p_dist)
+            if self._cfgs.model_cfgs.first_non_no_op_win:  # Use flattened 9-way KLD
+                if self._cfgs.model_cfgs.block_backward_action:  # Multi-Discrete [3,3,2,3] with 8-way KLD
+                    kl = kld_multi_categorical_flattened(distribution, self._p_dist)
+                else:  # Multi-Discrete [3,3,3,3] with 9-way KLD
+                    kl = kld_multi_categorical_flattened(distribution, self._p_dist,
+                                                         non_noop_idx=([0,2],[0,2],[0,2],[0,2]))
+            else:  # Use multi-categorical KLD
+                kl = kld_multi_categorical(distribution, self._p_dist)
         else:
             kl = torch.distributions.kl_divergence(distribution, self._p_dist).sum(-1, keepdim=True)
 
@@ -492,6 +502,7 @@ class FOCOPS_CADE(PolicyGradient):
                         target_value_r = self._view2d(target_value_r, squeeze=True)
                         self._update_reward_critic(obs, act, target_value_r)
                 else:  # Update actor and (immediate) reward estimator
+                    old_logits = self._view2d(old_logits)
                     if isinstance(self._actor_critic.actor, LatentMultiCategoricalActor):
                         self._p_dist = [Categorical(logits=split) for split in
                                         torch.split(old_logits, list(self._actor_critic.actor._act_dim_list), dim=-1)]
@@ -508,8 +519,8 @@ class FOCOPS_CADE(PolicyGradient):
                         self._view2d(target_value_r, squeeze=True),
                     )
 
-                    if self._cfgs.algo_cfgs.use_sdm:  # revert to 3 dim
-                        obs = obs.unsqueeze(0)  # [Batch, Sequence, Feature]
+                    if self._cfgs.algo_cfgs.use_sdm:
+                        obs = obs.unsqueeze(0)  # Revert obs to 3 dim: [Batch, Sequence, Feature]
 
                     self._update_actor_and_reward(obs, act, act_overlaid, logp, adv_r, adv_c,
                                                   reward if self._advantage_estimation_method == 'subm' else target_value_r)
@@ -518,9 +529,14 @@ class FOCOPS_CADE(PolicyGradient):
                 continue
 
             new_distribution = self._actor_critic.forward_actor(ep_obs_list, ep_act_list)
-            if isinstance(new_distribution, list):
-                kl = kld_multi_categorical(old_distribution, new_distribution)
-            else:
+            if isinstance(new_distribution, list):  # Multi-discrete
+                if self._cfgs.model_cfgs.first_non_no_op_win:
+                    # Note the order of new_distribution and old_distribution is different from the original FOCOPS.
+                    # This is to align with the order of new and old distributions in policy loss calculation
+                    kl = kld_multi_categorical_flattened(new_distribution, old_distribution)
+                else:
+                    kl = kld_multi_categorical(old_distribution, new_distribution)
+            else:  # Discrete
                 kl = (
                     torch.distributions.kl.kl_divergence(old_distribution, new_distribution)
                     .sum(-1, keepdim=True)
@@ -559,6 +575,12 @@ class FOCOPS_CADE(PolicyGradient):
             )
 
     def _view2d(self, tensor: torch.Tensor, squeeze: bool = False) -> torch.Tensor:
+        """
+        View a 3d tensor as 2d tensor.
+        :param tensor: input tensor
+        :param squeeze: whether to squeeze the last dimension if it is 1
+        :return: 2d tensor
+        """
         if tensor.dim() == 2:  # Batch x Feature
             tensor = tensor.unsqueeze(1)  # Batch x Sequence x Feature
 
@@ -806,14 +828,15 @@ class FOCOPS_CADE(PolicyGradient):
         next_obs: torch.Tensor,
     ) -> None:
         """
-        Update semantic dynamics model
+        Update semantic dynamics model (SDM).
+
         Args:
-            obs:
-            act:
-            next_obs:
+            obs: Observation tensor with shape [Batch, Feature].
+            act: Action tensor with shape [Batch, Action].
+            next_obs: Next observation tensor with shape [Batch, Feature].
 
         Returns:
-
+            None
         """
         # Concat obs and act
         obs_act = torch.cat((obs, act), dim=-1)
