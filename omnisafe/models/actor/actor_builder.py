@@ -54,6 +54,7 @@ class ActorBuilder:
         hidden_sizes: list[int],
         latent_size: int = 128,
         disable_no_op: bool = True,
+        first_non_no_op_win: bool = True,
         activation: Activation = 'relu',
         weight_initialization_mode: InitFunction = 'kaiming_uniform',
     ) -> None:
@@ -65,6 +66,7 @@ class ActorBuilder:
         self._hidden_sizes: list[int] = hidden_sizes
         self._latent_size: int = latent_size
         self._disable_no_op: bool = disable_no_op
+        self._first_non_no_op_win: bool = first_non_no_op_win
 
     # pylint: disable-next=too-many-return-statements
     def build_actor(
@@ -164,6 +166,7 @@ class ActorBuilder:
                 self._latent_size,
                 activation=self._activation,
                 weight_initialization_mode=self._weight_initialization_mode,
+                first_non_no_op_win=self._first_non_no_op_win,
             )
         raise NotImplementedError(
             f'Actor type {actor_type} is not implemented! '
