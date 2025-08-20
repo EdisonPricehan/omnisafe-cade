@@ -85,11 +85,12 @@ class SemanticDynamicsModel(nn.Module):
         """
         Given current observation and action, predict the next observation.
         Args:
-            obs_act:
-            round_to_int:
+            obs_act: tensor with shape (N, obs_feature + act_feature).
+            round_to_int: whether to round the predicted observation to integer values.
 
         Returns:
-
+            The predicted next observation, tensor with shape (N, H x W) where H and W are the patch dimensions.
+            If `round_to_int` is True, the values are rounded to the nearest integers, otherwise they remain as floats.
         """
         with torch.no_grad():
             delta = self.forward(obs_act)  # B x (H x W)
@@ -177,11 +178,11 @@ class SemanticDynamicsModel(nn.Module):
         Calculate next observation based on sdm-predicted corner coordinates offsets, which are used to estimate the
         homography matrix from current observation to the next predicted observation.
         Args:
-            obs_act:
-            delta:
+            obs_act: tensor with shape (N, obs_feature + act_feature).
+            delta: tensor with shape (N, 8), where N is the batch size.
 
         Returns:
-
+            Predicted next observation, tensor with shape (N, H x W) where H and W are the patch dimensions.
         """
         batch_size = obs_act.shape[0]
         corners_cur = self._corners_coord.expand(batch_size, 4, 2)  # B x 4 x 2
