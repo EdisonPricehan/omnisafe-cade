@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Tuple, Optional, List
+from typing import Any, Callable, Tuple, Optional, List, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -151,13 +151,89 @@ def kld_multi_categorical(
     return torch.mean(torch.stack(klds), dim=0)
 
 
+def kld_multi_categorical_flattened(
+    dist_p: List[Categorical],     # new/current policy heads
+    dist_q: List[Categorical],     # old policy heads (same minibatch)
+    no_op_idx: Sequence[int] = (1, 1, 1, 1),  # for [3,3,3,3] or [3,3,2,3]
+    non_noop_idx: Sequence[Sequence[int]] = ([0,2],[0,2],[0],[0,2]),  # for [3,3,2,3]
+    eps: float = 1e-8,
+    direction: str = "new||old",   # or "old||new" — be consistent everywhere
+) -> torch.Tensor:
+    """
+    KL over the executed-action distribution induced by 'first non–no-op wins'.
+
+    Outcomes = [all_noop] + concat_i [ (i, d) for d in non_noop_idx[i] ].
+    For [3,3,2,3] with no_op=1 and axis2 having only forward (0), outcomes = 1+(2+2+1+2)=8.
+    """
+
+    assert len(dist_p) == len(dist_q) == len(no_op_idx) == len(non_noop_idx)
+    A = len(dist_p)
+
+    def _probs2d(d: Categorical) -> torch.Tensor:
+        p = d.probs
+        return p.reshape(-1, p.size(-1))  # [N, n_classes]
+
+    # Build behavior probs b(s) ∈ R^{N × (1 + Σ_i |non_noop_idx[i]|)}
+    def _behavior(dists: List[Categorical]) -> torch.Tensor:
+        N = _probs2d(dists[0]).size(0)
+        device = _probs2d(dists[0]).device
+
+        # π_j(no-op)
+        p_noop_cols = []
+        for j, dj in enumerate(dists):
+            pj = _probs2d(dj)
+            assert 0 <= no_op_idx[j] < pj.size(1), f"no_op_idx[{j}] out of range"
+            p_noop_cols.append(pj[:, no_op_idx[j]])
+        p_noop = torch.stack(p_noop_cols, dim=1)  # [N, A]
+
+        # prefix[i] = ∏_{k<i} π_k(no-op), with prefix[0] = 1
+        prefix = []
+        run = torch.ones(N, device=device)
+        for i in range(A):
+            prefix.append(run)
+            run = run * p_noop[:, i]
+        prefix = torch.stack(prefix, dim=1)  # [N, A]
+
+        # Assemble outcomes
+        comps = [p_noop.prod(dim=1)]  # all_noop, shape [N]
+        for i, di in enumerate(dists):
+            pi = _probs2d(di)
+            # sanity: all non-no-op indices valid for this head
+            for k in non_noop_idx[i]:
+                assert 0 <= k < pi.size(1) and k != no_op_idx[i], \
+                    f"non_noop_idx[{i}] contains invalid class {k}"
+                comps.append(prefix[:, i] * pi[:, k])  # [N]
+        b = torch.stack(comps, dim=1).clamp_min(eps)     # [N, 1+Σ|non_noop|]
+        return b
+
+    b_new = _behavior(dist_p)          # gradients flow through new
+    with torch.no_grad():
+        b_old = _behavior(dist_q)      # old is a constant target
+
+    if direction == "new||old":
+        kl_per = (b_new * (b_new.log() - b_old.log())).sum(dim=1)  # KL(new||old)
+    elif direction == "old||new":
+        kl_per = (b_old * (b_old.log() - b_new.log())).sum(dim=1)  # KL(old||new)
+    else:
+        raise ValueError("direction must be 'new||old' or 'old||new'")
+
+    return kl_per.mean()
+
+
 def logits_from_multi_categorical(
     dists: List[Categorical],
 ) -> torch.Tensor:
+    """
+    Get the logits from a list of Categorical distributions.
+
+    :param dists: List of Categorical distributions.
+    :return: A tensor of logits concatenated from the distributions.
+    """
     assert len(dists) > 0, f'List of distributions is empty!'
 
+    # For a MultiDiscrete action space with shape [3,3,3,3], the logits will be of shape (seq, 3+3+3+3=12)
+    # If the backward movement is blocked, action space is [3,3,2,3], the logits will be of shape (seq, 3+3+2+3=11)
     logits = torch.cat([dist.logits for dist in dists], dim=-1)
-    # print(f'{logits.shape=}')
 
     return logits
 
