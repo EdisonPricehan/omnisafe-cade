@@ -5,14 +5,13 @@ from mlagents_envs.side_channel.agent_reset_channel import AgentResetChannel
 from mlagents_envs import logging_util
 
 
-import omnisafe
-from omnisafe.algorithms.algo_wrapper import AlgoWrapper as Agent
+# import omnisafe
 from omnisafe.envs.core import CMDP, env_register
 from omnisafe.typing import OmnisafeSpace
 from omnisafe.typing import DEVICE_CPU
 from omnisafe.utils.patchification import inflate_patch_mask, get_patchified_mask
 
-from gymnasium.spaces import Box, MultiBinary
+from gymnasium.spaces import Box, MultiBinary, Discrete, MultiDiscrete
 
 from typing import Any, Union, ClassVar, List, Tuple, Optional
 import os
@@ -54,7 +53,9 @@ channel_reset = AgentResetChannel()  # TODO get this from made unity gym env
 worker_id: int = 0  # temp workaround for duplicate unity env creation (both in env_register and real training)
 
 
+# Deprecated
 def load_vae_model() -> nn.Module:
+    """Deprecated. Used to load pre-trained VAE model for encoding observations."""
     assert os.path.exists(vae_model_name), f'{vae_model_name} does not exist!'
 
     vae_model = VAE(in_channels=channel_config.value, latent_dim=latent_dim, hidden_dims=hidden_dims)
@@ -98,10 +99,24 @@ class RiverineEnv(CMDP):
         env_path: Optional[str] = None,
         use_vae: bool = False,
         water_perc_thr: float = 0.5,
+        use_discrete_action: bool = False,
+        block_backward_action: bool = True,
         device: Union[torch.device, str] = DEVICE_CPU,
         max_idle_steps: int = 50,
         **kwargs,
     ) -> None:
+        """
+        Initialize the Riverine environment.
+        :param env_id: choose from 'easy', 'medium', 'hard' or leave empty to use env_path
+        :param env_path: environment path to the compiled Unity environment.
+        :param use_vae: whether to use VAE for observation encoding.
+        :param water_perc_thr: the water percentage threshold for patchification.
+        :param use_discrete_action: whether to use discrete action space instead of multi-discrete.
+        :param block_backward_action: whether to block backward action in discrete action space.
+        :param device: device to run the environment on, e.g., 'cpu' or 'cuda:0'.
+        :param max_idle_steps: maximum number of idle steps before the environment is reset.
+        :param kwargs:
+        """
         # Check env path validity
         if env_id == '':
             assert env_path is not None, f'Need either env_id or env_path to load Unity env.'
@@ -118,8 +133,8 @@ class RiverineEnv(CMDP):
         super().__init__(env_id)
         self._device = torch.device(device)
 
+        # Init Unity environment with the unique worker_id
         global worker_id
-
         self.env = make_unity_env(
             env_path=env_path,
             worker_id=worker_id,
@@ -149,7 +164,12 @@ class RiverineEnv(CMDP):
             self._observation_space = MultiBinary(self.patch_dim_x * self.patch_dim_y)
 
         # Set action space
-        self._action_space = self.env.action_space
+        self.use_discrete_action = use_discrete_action
+        self.block_backward_action = block_backward_action
+        if use_discrete_action:
+            self._action_space = Discrete(8) if block_backward_action else Discrete(9)
+        else:
+            self._action_space = MultiDiscrete([3, 3, 2, 3]) if block_backward_action else self.env.action_space
 
         print(f'Riverine, obs space: {self._observation_space}')
         print(f'Riverine, action space: {self._action_space}')
@@ -166,6 +186,13 @@ class RiverineEnv(CMDP):
         return self.env.cur_cost
 
     def step(self, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        # Convert discrete action to multi-discrete action if needed
+        if self.use_discrete_action:
+            assert action.squeeze().dim() == 0, f'Action should be a scalar for discrete action space, got {action.shape}'
+            action = torch.tensor(discrete_to_multi_discrete_action(action.cpu().item()))
+            # if not np.all(np.array(action) == 1):
+            #     print(f'Converted discrete action to multi-discrete: {action}')
+
         # obs is a list of RGB image and water mask arrays
         obs, rew, cost, term, trunc, info = self.env.step(action.tolist())
         self.rgb, self.mask, self.rgb_mask = self.env.render()
@@ -256,9 +283,10 @@ class RiverineEnv(CMDP):
 
     def get_vae_embedding(self) -> np.ndarray:
         """
-        Encode 4-channel rgb+mask observation to a latent vector using pre-trained VAE model
-        Returns:
+        Encode 4-channel rgb+mask observation to a latent vector using pre-trained VAE model.
 
+        Returns:
+            The encoded observation as a 1D numpy array with length equal to latent_dim.
         """
         _, _, rgb_mask = self.env.render()
 
@@ -270,9 +298,10 @@ class RiverineEnv(CMDP):
 
     def get_patch_dim(self) -> Tuple[int, int]:
         """
-        Get the patch numbers on x and y axes based on the patchification params
-        Returns:
+        Get the patch numbers on x and y axes based on the patchification params.
 
+        Returns:
+            A tuple containing the number of patches in x and y axes.
         """
         patch_dim_x: int = ((image_size - self.patch_size_x) // self.patch_step) + 1
         patch_dim_y: int = ((image_size - self.patch_size_y) // self.patch_step) + 1
@@ -382,28 +411,28 @@ class RiverineEnv(CMDP):
         return self._coordinate_observation_space
 
 
-def evaluate(algo: str, env_id: str, seed_id: int, eval_time: int):
-    LOG_DIR = f'./runs/{algo}-{{Medium}}/seed-{str(seed_id)}'
-    global env_path, seed
-    env_path = f'/home/edison/Research/unity-saferl-envs/{env_id.lower()}_dr/riverine_{env_id.lower()}_dr_env.x86_64'
-    seed = seed_id
+def discrete_to_multi_discrete_action(action: int) -> List[int]:
+    """
+    Convert a discrete action to a multi-discrete action.
 
-    evaluator = omnisafe.Evaluator(render_mode='rgb_array')
-    scan_dir = os.scandir(os.path.join(LOG_DIR, 'torch_save'))
-    for item in scan_dir:
-        if item.is_file() and item.name.split('.')[-1] == 'pt' and '200' in item.name:
-            evaluator.load_saved(
-                save_dir=LOG_DIR,
-                model_name=item.name,
-                camera_name='track',
-                width=128,
-                height=128,
-            )
-            result_path = f'./eval-V3/{algo}/{env_id}/seed{seed}'
-            if not os.path.exists(result_path):
-                os.makedirs(result_path)
-            evaluator.render(num_episodes=eval_time, save_replay_path=result_path, max_render_steps=1000)
-    scan_dir.close()
+    Args:
+        action (int): Discrete action value in range [0, 8], where 0 means no movement.
+
+    Returns:
+        List[int]: Multi-discrete action as a list of 4 integers, at 4 distinct axes.
+    """
+    assert 0 <= action <= 8, f'Action {action} is out of range [0, 8]'
+
+    multi_discrete_action = [1, 1, 1, 1]  # Default action (no movement)
+
+    if action == 0:  # No movement
+        return multi_discrete_action
+
+    axis_idx = (action - 1) // 2
+    direction = 0 if action % 2 == 1 else 2  # 0 for positive direction, 2 for negative direction
+    multi_discrete_action[int(axis_idx)] = int(direction)
+
+    return multi_discrete_action
 
 
 if __name__ == '__main__':
@@ -421,6 +450,7 @@ if __name__ == '__main__':
         env_id=env_id,
         use_vae=False,
         water_perc_thr=0.5,
+        use_discrete_action=True,  # Test discrete action space
         device='cpu',
         max_idle_steps=50000,
     )
@@ -468,12 +498,20 @@ if __name__ == '__main__':
         i = 0
         while i < 10000:
             # get next action manually
-            action = k2a.get_multi_discrete_action()  # default action if no keyboard input
+            if env.use_discrete_action:
+                action = k2a.get_discrete_action()
+            else:
+                action = k2a.get_multi_discrete_action()  # default action if no keyboard input
 
             obs, reward, cost, terminated, truncated, info = env.step(torch.Tensor(action))
 
-            if not np.all(np.array(action) == 1):
-                print(f'Action: {action}, reward: {reward:.2f}, cost: {cost:.2f}')
+            # Print meaningful action, reward, and cost
+            if env.use_discrete_action:
+                if action[0] != 0:
+                    print(f'Action: {action[0]}, reward: {reward:.2f}, cost: {cost:.2f}')
+            else:
+                if not np.all(np.array(action) == 1):
+                    print(f'Action: {action}, reward: {reward:.2f}, cost: {cost:.2f}')
 
             rgb, mask, mixed = env.render()
 
