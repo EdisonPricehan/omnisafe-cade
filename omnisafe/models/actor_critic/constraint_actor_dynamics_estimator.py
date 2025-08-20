@@ -46,6 +46,7 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         self.act_dim = get_act_dim(act_space, execution_dim=True)
         self.model_cfgs: ModelConfig = model_cfgs
         self.is_value_critic: bool = is_value_critic
+        self._disable_no_op: bool = model_cfgs.disable_no_op
 
         # Define shared GRU layer for actor and reward critic
         self.gru = nn.GRU(
@@ -60,13 +61,13 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         self.add_module('gru', self.gru)
 
         # Define actor head
-        self._disable_no_op: bool = model_cfgs.disable_no_op
         self.actor: Actor = ActorBuilder(
             obs_space=obs_space,
             act_space=act_space,
             hidden_sizes=model_cfgs.actor.hidden_sizes,
             latent_size=model_cfgs.latent_size,
             disable_no_op=self._disable_no_op,
+            first_non_no_op_win=model_cfgs.first_non_no_op_win,
             activation=model_cfgs.actor.activation,
             weight_initialization_mode=model_cfgs.weight_initialization_mode,
         ).build_actor(
@@ -462,6 +463,12 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         self,
         obs: torch.Tensor,
     ) -> str:
+        """
+        Print observation in a human-readable format, assuming square observation space.
+
+        :param obs (torch.Tensor): Observation tensor with square shape, no batch or sequence dimension greater than 1.
+        :return: str: Formatted string representation of the observation.
+        """
         outfile = StringIO()
 
         obs_np = obs.squeeze().numpy()
@@ -491,6 +498,42 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         with closing(outfile):
             return outfile.getvalue()
 
+    def _mask_multidiscrete_action(self, actions: torch.Tensor) -> torch.Tensor:
+        """
+        Mask MultiDiscrete actions to ensure only one axis is executed at a time, differentiable.
+
+        :param:
+            actions: torch.Tensor, actions in MultiDiscrete format, shape [batch, 4], values in {0, 1, 2}.
+
+        :return:
+            masked_actions: torch.Tensor, actions with all axes after the first non-1 set to 1 (no-op).
+        """
+        # Clone actions to avoid in-place modification
+        actions_copy = actions.clone()
+
+        # Numerically stable version - detect non-1 values
+        is_non1 = (actions_copy != 1).float()
+
+        # Cumulative sum to find first non-1
+        cumsum = torch.cumsum(is_non1, dim=1)
+
+        # Small epsilon to prevent numerical instability
+        epsilon = 1e-6
+
+        # Mask: 1 for axes after the first non-1 (cumsum > 1), 0 otherwise
+        # Add epsilon for numerical stability
+        with torch.no_grad():
+            mask = (cumsum > 1 + epsilon).float()
+
+        # For axes after the first non-1, set to 1 (no-op)
+        masked_actions = actions_copy * (1 - mask) + mask
+
+        # Safety check - detect and eliminate NaN values
+        if torch.isnan(masked_actions).any():
+            raise ValueError('NaN values detected in masked actions!')
+
+        return masked_actions
+
     def step(
         self,
         obs: torch.Tensor,
@@ -505,16 +548,25 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         Get necessary network outputs (log_prob, reward_pred, cost_value_pred) to calculate policy loss
 
         Args:
-            obs:
-            last_act:
-            lagrangian_multiplier:
-            latent:
-            deterministic:
-            enable_safety_layer:
-            safety_layer_use_reward:
+            obs (torch.Tensor): Observation tensor of shape [B, obs_dim], where B is the batch size.
+            last_act (torch.Tensor): Last action tensor of shape [B, act_dim], where B is the batch size.
+            lagrangian_multiplier (float): Current Lagrangian multiplier for safety layer.
+            latent (Optional[torch.Tensor]): Latent state tensor of shape [B, latent_dim], where B is the batch size.
+            deterministic (bool): Whether to use deterministic policy for action prediction.
+            enable_safety_layer (bool): Whether to enable the safety layer for action selection.
+            safety_layer_use_reward (bool): Whether to incorporate reward criteria in the safety layer.
 
         Returns:
+            tuple: A tuple containing:
+                - action (torch.Tensor): Predicted action tensor of shape [B, act_dim].
+                - log_prob (torch.Tensor): Log probability of the predicted action.
+                - action_overlaid (torch.Tensor): Tensor indicating whether the action was overlaid by the safety layer.
+                - reward (torch.Tensor): Predicted reward tensor.
+                - value_cost (torch.Tensor): Predicted step cost tensor based on the next predicted observation.
+                - latent_output (torch.Tensor): Latent output from the GRU layer.
 
+        Raises:
+            NotImplementedError: If the action space is not supported (e.g., MultiDiscrete with no-op).
         """
         with torch.no_grad():
             # Step shared layers of actor and reward estimator
@@ -522,13 +574,21 @@ class ConstraintActorDynamicsEstimator(nn.Module):
             gru_output, latent_output = self.gru(obs_last_act, latent)
             # gru_output, latent_output = self.gru(obs, latent)  # Only obs input
 
+            # Note: gru_output and latent_output are exactly the same with 1 gru layer
             # print(f'{obs.shape=} {gru_output.shape=} {latent_output.shape=}')  # [Sequence x Feature]
             # print(f'{gru_output=}')
             # print(f'{latent_output=}')
 
             # Step actor
             action = self.actor.predict(gru_output, deterministic=deterministic)
-            # print(f'Step action: {action}')
+
+            # Mask action to single axis if only the first non-no-op action is considered as the winning action
+            if self.model_cfgs.first_non_no_op_win:
+                if isinstance(self.act_space, MultiDiscrete):
+                    action = self._mask_multidiscrete_action(action)
+                    # print(f'Masked action: {action}')
+                else:
+                    raise NotImplementedError(f'Action space {self.act_space} not supported!')
 
             # Alternate action by action space (disable no_op)
             if self._disable_no_op:
@@ -606,10 +666,25 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         self,
         action: torch.Tensor,
     ) -> torch.Tensor:
-        assert action.dim() == 2, f'Expect action dim to be 2, got {action.dim()}.'
+        """
+        Shift action tensor backward by 1 step to represent the last action taken at the current time step.
+        Used for GRU input where the last action is concatenated with the current observation.
+
+        :param action (torch.Tensor): Action tensor of shape (sequence, feature).
+
+        :return: torch.Tensor: Shifted action tensor of shape (1, sequence, feature).
+        """
+        assert action.dim() == 2, f'Expect action dim to be 2: (seq, feat), got {action.dim()}.'
 
         a_shifted = torch.zeros_like(action)  # (sequence, feature)
         a_shifted[1:] = action[:-1]
+
+        # For multi-discrete action space, the nominal action is no-op: all 1s across all branches
+        # For discrete action space, the nominal action is 0 so nothing to do
+        if isinstance(self.act_space, MultiDiscrete):
+            # Set the first last action to no-op (1s)
+            a_shifted[0] = 1.0
+
         a_shifted = a_shifted.unsqueeze(0)  # (1, sequence, feature)
 
         return a_shifted
@@ -619,6 +694,16 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         obs: Union[torch.Tensor, List[torch.Tensor]],
         act: Union[torch.Tensor, List[torch.Tensor]],
     ) -> torch.Tensor:
+        """
+        Forward pass through the shared GRU layers, concatenating observations and shifted actions.
+        :param obs:
+            Observation tensor of shape (Batch, Sequence, Feature) or a list of tensors.
+            If a list, each tensor should be of shape (Sequence, Feature).
+        :param act:
+            Action tensor of shape (Batch, Sequence, Feature) or a list of tensors.
+            If a list, each tensor should be of shape (Sequence, Feature).
+        :return: torch.Tensor: GRU output tensor of shape (Batch * Sequence, Feature).
+        """
         if isinstance(obs, List):
             assert isinstance(act, List)
             assert len(obs) == len(act), f'Obs and act lists should have the same length.'
@@ -643,7 +728,6 @@ class ConstraintActorDynamicsEstimator(nn.Module):
                 gru_outputs.append(gru_output)
 
             gru_output = torch.cat(gru_outputs, dim=0)  # Concatenate along the sequence dimension
-            # TODO act is not considered
 
         elif isinstance(obs, torch.Tensor):
             assert isinstance(act, torch.Tensor)
@@ -681,11 +765,23 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         obs: Union[torch.Tensor, List[torch.Tensor]],
         act: Union[torch.Tensor, List[torch.Tensor]],
     ) -> Union[Distribution, List[Distribution]]:
+        """
+        Forward pass through the actor network, using the shared GRU layers to process observations and actions.
+        :param obs:
+            Observation tensor of shape (Batch, Sequence, Feature) or a list of tensors.
+            If a list, each tensor should be of shape (Sequence, Feature).
+        :param act:
+            Action tensor of shape (Batch, Sequence, Feature) or a list of tensors.
+            If a list, each tensor should be of shape (Sequence, Feature).
+        :return: Union[Distribution, List[Distribution]]:
+            Distribution object for discrete action space, or a list of distributions for multi-discrete action space.
+        """
         # Pass obs to shared GRU layers, but no grad for separate pass
         with torch.no_grad():
             gru_output = self.forward_gru(obs, act)
 
         # Pass the concatenated GRU outputs to the actor MLP
+        # gru_output is of shape (sequence, feature)
         distribution: Union[Distribution, List[Distribution]] = self.actor(gru_output)
 
         return distribution
@@ -696,6 +792,9 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         last_act: torch.Tensor,
         deterministic: bool = False,
     ) -> torch.Tensor:
+        """
+        Deprecated method to predict actions using the actor network, will be removed in future versions.
+        """
         obs_last_act = torch.cat([obs, last_act], dim=-1)
         gru_output, self.gru_latent = self.gru(obs_last_act, self.gru_latent)
 
@@ -709,6 +808,17 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         obs: Union[torch.Tensor, List[torch.Tensor]],
         act: Union[torch.Tensor, List[torch.Tensor]],
     ) -> List[torch.Tensor]:
+        """
+        Forward pass through the reward estimator network, using the shared GRU layers to process observations and actions.
+        :param obs:
+            Observation tensor of shape (Batch, Sequence, Feature) or a list of tensors.
+            If a list, each tensor should be of shape (Sequence, Feature).
+        :param act:
+            Action tensor of shape (Batch, Sequence, Feature) or a list of tensors.
+            If a list, each tensor should be of shape (Sequence, Feature).
+        :return:
+            List[torch.Tensor]: Reward predictions for all reward estimators/critics.
+        """
         # Pass obs to shared GRU layers, but no grad for separate pass
         with torch.no_grad():
             gru_output = self.forward_gru(obs, act)
@@ -729,17 +839,36 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         obs: Union[torch.Tensor, List[torch.Tensor]],
         act: Union[torch.Tensor, List[torch.Tensor]],
     ) -> Tuple[Union[Distribution, List[Distribution]], List[torch.Tensor]]:
+        """
+        Forward pass through the actor and reward estimator networks, using the shared GRU layers to process observations and actions.
+        This method combines the outputs of both networks (actor and reward estimator) into a single forward pass.
+        :param obs:
+            Observation tensor of shape (Batch, Sequence, Feature) or a list of tensors.
+            If a list, each tensor should be of shape (Sequence, Feature).
+        :param act:
+            Action tensor of shape (Batch, Sequence, Feature) or a list of tensors.
+            If a list, each tensor should be of shape (Sequence, Feature).
+        :return:
+            A tuple containing:
+                - distribution: Distribution object for discrete action space, or a list of distributions
+                for multi-discrete action space.
+                - reward_pred: List of reward predictions for all reward estimators/critics.
+        """
         # Pass obs to shared GRU layers, grad is required for combined pass
         gru_output = self.forward_gru(obs, act)
 
         reward_features = gru_output.detach()
+
+        # Check if gru_output is NaN
+        if torch.isnan(gru_output).any():
+            raise ValueError("GRU output contains NaN values.")
 
         # Pass the concatenated GRU outputs to the actor MLP
         distribution: Union[Distribution, List[Distribution]] = self.actor(gru_output)
 
         # Pass the concatenated GRU outputs to the reward estimator MLP
         if self.is_value_critic:
-            reward_pred = self.reward_critic(gru_output)
+            reward_pred = self.reward_critic(reward_features)
         else:
             reward_pred = self.reward_critic(reward_features, act)  # Reward loss does not affect gru training
 
@@ -750,6 +879,17 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         obs: torch.Tensor,
         act: torch.Tensor,
     ) -> torch.Tensor:
+        """
+        Deprecated, will be removed in future versions.
+
+        Forward pass through the Semantic Dynamics Model (SDM) to predict the next state given the current observation and action.
+        :param obs:
+            Observation tensor of shape (Batch, Obs_Dim), where Batch is the batch size and Obs_Dim is the observation dimension.
+        :param act:
+            Action tensor of shape (Batch, Act_Dim), where Act_Dim is the action dimension.
+        :return:
+            torch.Tensor: Predicted corner variations in pixels.
+        """
         obs_act = torch.cat([obs, act], dim=-1)
         delta = self.sdm(obs_act)
         return delta
@@ -761,6 +901,7 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         latent: torch.Tensor,
         deterministic: bool = False,
     ) -> tuple[torch.Tensor, ...]:
+        """Deprecated, will be removed in future versions."""
         return self.step(
             obs=obs,
             last_act=last_act,
