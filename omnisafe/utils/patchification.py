@@ -163,18 +163,48 @@ def inflate_patch_mask(
 if __name__ == '__main__':
     import cv2
 
-    mask_dir: str = '/home/edison/Research/omnisafe_zjy/examples/evaluations/riverine/video_inference/masks'
+    # mask_dir: str = '/home/edison/Research/omnisafe_zjy/examples/evaluations/riverine/video_inference/masks'
+    #
+    # for item in os.scandir(mask_dir):
+    #     mask = cv2.imread(item.path)
+    #     cv2.imshow('Mask', mask)
+    #
+    #     mask_patch = get_patchified_mask(
+    #         mask=mask,
+    #         is_uint8=True,
+    #         patch_size_x=8,
+    #         patch_size_y=8,
+    #         patch_step=8,
+    #         binary_threshold=0.5,
+    #         patch_threshold=0.5
+    #     )
 
-    for item in os.scandir(mask_dir):
-        mask = cv2.imread(item.path)
-        cv2.imshow('Mask', mask)
+    # Patchify a mask then inflate it back to original size
+    mask_path: str = '/home/edison/Research/splashdrone_ws/src/SplashDrone4-ros/masks/19691231_190958.png'
+    mask = cv2.imread(mask_path)
+    cv2.imshow('Original Mask', mask)
+    mask_patch = get_patchified_mask(
+        mask=mask,
+        is_uint8=True,
+        patch_size_x=8,
+        patch_size_y=8,
+        patch_step=8,
+        binary_threshold=0.5,
+        patch_threshold=0.5
+    )
 
-        mask_patch = get_patchified_mask(
-            mask=mask,
-            is_uint8=True,
-            patch_size_x=8,
-            patch_size_y=8,
-            patch_step=8,
-            binary_threshold=0.5,
-            patch_threshold=0.5
-        )
+    inflated_mask = inflate_patch_mask(
+        obs=mask_patch,
+        image_size=128,
+        patch_dim_x=16,
+        patch_dim_y=16,
+        patch_size_x=8,
+        patch_size_y=8,
+    )
+    cv2.imshow('Patchified Mask', inflated_mask * 255)
+    cv2.waitKey(0)
+
+    # Save the patchified mask
+    cv2.imwrite('mask_patch.png', inflated_mask * 255)
+    print(f'Saved patchified mask to mask_patch.png')
+
