@@ -133,6 +133,8 @@ class Config(dict):
     num_gru_layers: int
     gru_lr: float
     disable_no_op: bool
+    first_non_no_op_win: bool
+    block_backward_action: bool
     use_lagrangian: bool
     use_sdm: bool
     use_safety_layer: bool
