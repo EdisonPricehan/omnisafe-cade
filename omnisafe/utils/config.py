@@ -236,6 +236,7 @@ class ModelConfig(Config):
     std: list[float]
     use_obs_encoder: bool
     lr: float | None
+    separate_reward_gru: bool
 
 
 def get_default_kwargs_yaml(algo: str, env_id: str, algo_type: str) -> Config:

@@ -153,6 +153,8 @@ defaults:
     weight_initialization_mode: "kaiming_uniform"
     # actor type, options: gaussian, gaussian_learning
     actor_type: latent_discrete
+    # Whether to use separate GRU for reward head
+    separate_reward_gru: False
     # latent size of shared recurrent (GRU) network
 #    latent_size: 256
 #    latent_size: 128
@@ -390,6 +392,8 @@ medium:
     # actor type, options: gaussian, gaussian_learning
     actor_type: latent_multi_discrete
 #    actor_type: latent_discrete
+    # Whether to use separate GRU for reward head
+    separate_reward_gru: False
     # latent size of shared recurrent (GRU) network
 #    latent_size: 256
 #    latent_size: 128

@@ -608,6 +608,10 @@ class FOCOPS_CADE(PolicyGradient):
         adv_c: torch.Tensor,
         reward: torch.Tensor,
     ) -> None:
+        """
+        Update actor and reward networks. When using separate GRU networks,
+        actor path and reward path are trained independently.
+        """
         # Forward pass actor and reward estimator to get network outputs
         distribution, reward_pred = self._actor_critic.forward_actor_reward(obs, act)
 
@@ -629,12 +633,9 @@ class FOCOPS_CADE(PolicyGradient):
         # weights_pi_r = torch.Tensor([loss_pi.mean().item() / (self._last_loss_pi + 1e-6),
         #                              loss_r.mean().item() / (self._last_loss_r + 1e-6)]) / T
         # weights_pi_r = torch.nn.functional.softmax(weights_pi_r) * K
-
         # loss = weights_pi_r[0] * loss_pi + weights_pi_r[1] * loss_r  # Dynamically weighted loss
-        loss = loss_pi + loss_r  # Update both actor and reward estimator
-        # loss = loss_pi  # Only update actor
 
-        # Update the latest losses
+        # Update the latest losses for logging
         self._last_loss_pi = loss_pi.mean().item()
         self._last_loss_r = loss_r.mean().item()
 
@@ -645,38 +646,57 @@ class FOCOPS_CADE(PolicyGradient):
         else:
             self._logger.store({'Loss/Loss_reward_critic': loss_r.mean().item()})
 
-        # Zero the gradients
+        # Zero all relevant gradients
         self._actor_critic.gru_optimizer.zero_grad()
         self._actor_critic.actor_optimizer.zero_grad()
         self._actor_critic.reward_critic_optimizer.zero_grad()
+        if self._actor_critic._separate_reward_gru:
+            self._actor_critic.reward_gru_optimizer.zero_grad()
 
-        # Backpropagate total loss
-        loss.backward()
+        # When using separate GRUs, optimize actor and reward paths independently
+        if self._actor_critic._separate_reward_gru:
+            # Optimize actor path (GRU + actor)
+            loss_pi.backward()
+            if self._cfgs.algo_cfgs.use_max_grad_norm:
+                clip_grad_norm_(self._actor_critic.gru.parameters(), self._cfgs.algo_cfgs.max_grad_norm)
+                clip_grad_norm_(self._actor_critic.actor.parameters(), self._cfgs.algo_cfgs.max_grad_norm)
+            distributed.avg_grads(self._actor_critic.gru)
+            distributed.avg_grads(self._actor_critic.actor)
+            self._actor_critic.gru_optimizer.step()
+            self._actor_critic.actor_optimizer.step()
 
-        # Constrain gradients
-        if self._cfgs.algo_cfgs.use_max_grad_norm:
-            clip_grad_norm_(
-                self._actor_critic.gru.parameters(),
-                self._cfgs.algo_cfgs.max_grad_norm,
-            )
-            clip_grad_norm_(
-                self._actor_critic.actor.parameters(),
-                self._cfgs.algo_cfgs.max_grad_norm,
-            )
-            clip_grad_norm_(
-                self._actor_critic.reward_critic.parameters(),
-                self._cfgs.algo_cfgs.max_grad_norm,
-            )
+            # Optimize reward path (reward GRU + reward critic)
+            loss_r.backward()
+            if self._cfgs.algo_cfgs.use_max_grad_norm:
+                clip_grad_norm_(self._actor_critic.reward_gru.parameters(), self._cfgs.algo_cfgs.max_grad_norm)
+                clip_grad_norm_(self._actor_critic.reward_critic.parameters(), self._cfgs.algo_cfgs.max_grad_norm)
+            distributed.avg_grads(self._actor_critic.reward_gru)
+            distributed.avg_grads(self._actor_critic.reward_critic)
+            self._actor_critic.reward_gru_optimizer.step()
+            self._actor_critic.reward_critic_optimizer.step()
+        else:
+            # When using shared GRU, optimize everything together
+            loss = loss_pi + loss_r  # Update both actor and reward estimator
+            # loss = loss_pi  # Only update actor
 
-        # Multi-process
-        distributed.avg_grads(self._actor_critic.gru)
-        distributed.avg_grads(self._actor_critic.actor)
-        distributed.avg_grads(self._actor_critic.reward_critic)
+            # Backpropagate total loss
+            loss.backward()
 
-        # Update parameters
-        self._actor_critic.gru_optimizer.step()
-        self._actor_critic.actor_optimizer.step()
-        self._actor_critic.reward_critic_optimizer.step()
+            # Clip gradients if needed
+            if self._cfgs.algo_cfgs.use_max_grad_norm:
+                clip_grad_norm_(self._actor_critic.gru.parameters(), self._cfgs.algo_cfgs.max_grad_norm)
+                clip_grad_norm_(self._actor_critic.actor.parameters(), self._cfgs.algo_cfgs.max_grad_norm)
+                clip_grad_norm_(self._actor_critic.reward_critic.parameters(), self._cfgs.algo_cfgs.max_grad_norm)
+
+            # Average gradients across processes
+            distributed.avg_grads(self._actor_critic.gru)
+            distributed.avg_grads(self._actor_critic.actor)
+            distributed.avg_grads(self._actor_critic.reward_critic)
+
+            # Update parameters
+            self._actor_critic.gru_optimizer.step()
+            self._actor_critic.actor_optimizer.step()
+            self._actor_critic.reward_critic_optimizer.step()
 
     def _update_reward_estimator(
         self,
@@ -684,7 +704,7 @@ class FOCOPS_CADE(PolicyGradient):
         act: torch.Tensor,
         rewards: torch.Tensor,
     ) -> None:
-        r"""Update reward estimator network (excluding the shared gru part).
+        """Update reward estimator network.
 
         The loss function is ``MSE loss``, which is defined in ``torch.nn.MSELoss``.
         Specifically, the loss function is defined as:
@@ -693,87 +713,53 @@ class FOCOPS_CADE(PolicyGradient):
 
             L = \frac{1}{N} \sum_{i=1}^N (\hat{r} - r)^2
 
-        where :math:`\hat{V}` is the predicted cost and :math:`V` is the target cost.
-
-        #. Compute the loss function.
-        #. Add the ``critic norm`` to the loss function if ``use_critic_norm`` is ``True``.
-        #. Clip the gradient if ``use_max_grad_norm`` is ``True``.
-        #. Update the network by loss function.
+        where :math:`\hat{V}` is the predicted reward and :math:`V` is the target reward.
 
         Args:
             obs (torch.Tensor): The observation.
+            act (torch.Tensor): The actions.
             rewards (torch.Tensor): The true rewards.
         """
+        # Zero all related gradients
         self._actor_critic.reward_critic_optimizer.zero_grad()
+        if self._actor_critic._separate_reward_gru:
+            self._actor_critic.reward_gru_optimizer.zero_grad()
 
+        # Forward pass through reward network and calculate loss
         pred_rewards = self._actor_critic.forward_reward(obs, act)[0]
-
         loss = nn.functional.mse_loss(pred_rewards.squeeze(), rewards.squeeze())
 
         if self._cfgs.algo_cfgs.use_critic_norm:
             for param in self._actor_critic.reward_critic.parameters():
                 loss += param.pow(2).sum() * self._cfgs.algo_cfgs.critic_norm_coef
 
+        # Backpropagate
         loss.backward()
 
+        # Clip gradients if needed
         if self._cfgs.algo_cfgs.use_max_grad_norm:
             clip_grad_norm_(
                 self._actor_critic.reward_critic.parameters(),
                 self._cfgs.algo_cfgs.max_grad_norm,
             )
+            if self._actor_critic._separate_reward_gru:
+                clip_grad_norm_(
+                    self._actor_critic.reward_gru.parameters(),
+                    self._cfgs.algo_cfgs.max_grad_norm,
+                )
 
+        # Average gradients across processes
         distributed.avg_grads(self._actor_critic.reward_critic)
+        if self._actor_critic._separate_reward_gru:
+            distributed.avg_grads(self._actor_critic.reward_gru)
 
+        # Update parameters
         self._actor_critic.reward_critic_optimizer.step()
+        if self._actor_critic._separate_reward_gru:
+            self._actor_critic.reward_gru_optimizer.step()
 
         self._logger.store({'Loss/Loss_reward_estimator': loss.mean().item()})
 
-    def _update_reward_critic(
-        self,
-        obs: torch.Tensor,
-        act: torch.Tensor,
-        target_value_r: torch.Tensor
-    ) -> None:
-        r"""Update value network under a double for loop.
-
-        The loss function is ``MSE loss``, which is defined in ``torch.nn.MSELoss``.
-        Specifically, the loss function is defined as:
-
-        .. math::
-
-            L = \frac{1}{N} \sum_{i=1}^N (\hat{V} - V)^2
-
-        where :math:`\hat{V}` is the predicted cost and :math:`V` is the target cost.
-
-        #. Compute the loss function.
-        #. Add the ``critic norm`` to the loss function if ``use_critic_norm`` is ``True``.
-        #. Clip the gradient if ``use_max_grad_norm`` is ``True``.
-        #. Update the network by loss function.
-
-        Args:
-            obs (torch.Tensor): The ``observation`` sampled from buffer.
-            act (torch.Tensor): The
-            target_value_r (torch.Tensor): The ``target_value_r`` sampled from buffer.
-        """
-        self._actor_critic.reward_critic_optimizer.zero_grad()
-
-        loss = nn.functional.mse_loss(self._actor_critic.forward_reward(obs, act)[0], target_value_r)
-
-        if self._cfgs.algo_cfgs.use_critic_norm:
-            for param in self._actor_critic.reward_critic.parameters():
-                loss += param.pow(2).sum() * self._cfgs.algo_cfgs.critic_norm_coef
-
-        loss.backward()
-
-        if self._cfgs.algo_cfgs.use_max_grad_norm:
-            clip_grad_norm_(
-                self._actor_critic.reward_critic.parameters(),
-                self._cfgs.algo_cfgs.max_grad_norm,
-            )
-        distributed.avg_grads(self._actor_critic.reward_critic)
-        self._actor_critic.reward_critic_optimizer.step()
-
-        self._logger.store({'Loss/Loss_reward_estimator': loss.mean().item()})
 
     def _update_cost_critic(self, obs: torch.Tensor, target_value_c: torch.Tensor) -> None:
         r"""Update cost estimator network.

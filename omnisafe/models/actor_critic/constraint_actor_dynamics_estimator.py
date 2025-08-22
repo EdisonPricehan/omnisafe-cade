@@ -47,18 +47,34 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         self.model_cfgs: ModelConfig = model_cfgs
         self.is_value_critic: bool = is_value_critic
         self._disable_no_op: bool = model_cfgs.disable_no_op
+        self._separate_reward_gru: bool = model_cfgs.separate_reward_gru
 
-        # Define shared GRU layer for actor and reward critic
-        self.gru = nn.GRU(
-            # input_size=self.obs_dim,
-            input_size=self.obs_dim + self.act_dim,  # [obs_{t}, act_{t-1}]
-            hidden_size=model_cfgs.latent_size,
-            num_layers=model_cfgs.num_gru_layers,
+        # Define GRU layer(s)
+        gru_input_size = self.obs_dim + self.act_dim  # [obs_{t}, act_{t-1}]
+        gru_hidden_size = model_cfgs.latent_size
+        gru_num_layers = model_cfgs.num_gru_layers
+        gru_params = dict(
+            input_size=gru_input_size,
+            hidden_size=gru_hidden_size,
+            num_layers=gru_num_layers,
             batch_first=True,
         )
+
+        # GRU for actor (and reward if not separate)
+        self.gru = nn.GRU(**gru_params)
         self.gru_optimizer: optim.Optimizer = optim.Adam(self.gru.parameters(), lr=model_cfgs.gru_lr)
         self.gru_latent: Optional[torch.Tensor] = None
         self.add_module('gru', self.gru)
+
+        # Optional separate GRU for reward head
+        if self._separate_reward_gru:
+            self.reward_gru = nn.GRU(**gru_params)
+            self.reward_gru_optimizer: optim.Optimizer = optim.Adam(
+                self.reward_gru.parameters(),
+                lr=model_cfgs.gru_lr
+            )
+            self.reward_gru_latent: Optional[torch.Tensor] = None
+            self.add_module('reward_gru', self.reward_gru)
 
         # Define actor head
         self.actor: Actor = ActorBuilder(
@@ -693,17 +709,26 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         self,
         obs: Union[torch.Tensor, List[torch.Tensor]],
         act: Union[torch.Tensor, List[torch.Tensor]],
+        use_reward_gru: bool = False,
     ) -> torch.Tensor:
         """
-        Forward pass through the shared GRU layers, concatenating observations and shifted actions.
+        Forward pass through either shared GRU or reward GRU layers, concatenating observations and shifted actions.
         :param obs:
             Observation tensor of shape (Batch, Sequence, Feature) or a list of tensors.
             If a list, each tensor should be of shape (Sequence, Feature).
         :param act:
             Action tensor of shape (Batch, Sequence, Feature) or a list of tensors.
             If a list, each tensor should be of shape (Sequence, Feature).
+        :param use_reward_gru:
+            If True, use separate reward GRU (if enabled in config). If False, use shared GRU.
         :return: torch.Tensor: GRU output tensor of shape (Batch * Sequence, Feature).
         """
+        # Determine which GRU to use
+        if use_reward_gru and self._separate_reward_gru:
+            gru = self.reward_gru
+        else:
+            gru = self.gru
+
         if isinstance(obs, List):
             assert isinstance(act, List)
             assert len(obs) == len(act), f'Obs and act lists should have the same length.'
@@ -719,11 +744,7 @@ class ConstraintActorDynamicsEstimator(nn.Module):
 
                 obs_last_act = torch.cat([o, a_shifted], dim=-1)
 
-                gru_output, _ = self.gru(obs_last_act)
-
-                # gru_output, _ = self.gru(seq)
-                # gru_output = gru_output.view(-1, gru_output.size(-1))  # Flatten the output
-
+                gru_output, _ = gru(obs_last_act)
                 gru_output = gru_output.reshape(-1, gru_output.size(-1))  # Flatten the output
                 gru_outputs.append(gru_output)
 
@@ -745,15 +766,7 @@ class ConstraintActorDynamicsEstimator(nn.Module):
             assert act.dim() == 3, f'Action shape should be (Batch, Sequence, Feature), current: {act.shape}'
 
             obs_last_act = torch.cat([obs, act], dim=-1)
-            gru_output, latent = self.gru(obs_last_act)
-
-            # print(f'{obs_last_act.shape=} {gru_output.shape=} {latent.shape=}')
-            # print(f'{gru_output[0, -1]=}')
-            # print(f'{latent[0, -1]=}')
-
-            # gru_output, _ = self.gru(obs)
-            # print(f'{gru_output.shape=}')
-            # gru_output = gru_output.view(-1, gru_output.size(-1))  # Flatten the output
+            gru_output, latent = gru(obs_last_act)
             gru_output = gru_output.reshape(-1, gru_output.size(-1))  # Flatten the output
         else:
             raise TypeError(f"Expected input type torch.Tensor or list, got {type(obs)}")
@@ -778,7 +791,7 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         """
         # Pass obs to shared GRU layers, but no grad for separate pass
         with torch.no_grad():
-            gru_output = self.forward_gru(obs, act)
+            gru_output = self.forward_gru(obs, act, use_reward_gru=False)
 
         # Pass the concatenated GRU outputs to the actor MLP
         # gru_output is of shape (sequence, feature)
@@ -786,47 +799,25 @@ class ConstraintActorDynamicsEstimator(nn.Module):
 
         return distribution
 
-    def predict_actor(
-        self,
-        obs: Union[torch.Tensor, List[torch.Tensor]],
-        last_act: torch.Tensor,
-        deterministic: bool = False,
-    ) -> torch.Tensor:
-        """
-        Deprecated method to predict actions using the actor network, will be removed in future versions.
-        """
-        obs_last_act = torch.cat([obs, last_act], dim=-1)
-        gru_output, self.gru_latent = self.gru(obs_last_act, self.gru_latent)
-
-        # gru_output, self.gru_latent = self.gru(obs, self.gru_latent)
-
-        action = self.actor.predict(gru_output, deterministic=deterministic)
-        return action
-
     def forward_reward(
         self,
         obs: Union[torch.Tensor, List[torch.Tensor]],
         act: Union[torch.Tensor, List[torch.Tensor]],
     ) -> List[torch.Tensor]:
         """
-        Forward pass through the reward estimator network, using the shared GRU layers to process observations and actions.
+        Forward pass through the reward estimator network, as well as its separate gru.
         :param obs:
             Observation tensor of shape (Batch, Sequence, Feature) or a list of tensors.
             If a list, each tensor should be of shape (Sequence, Feature).
         :param act:
             Action tensor of shape (Batch, Sequence, Feature) or a list of tensors.
             If a list, each tensor should be of shape (Sequence, Feature).
-        :return:
-            List[torch.Tensor]: Reward predictions for all reward estimators/critics.
+        :return: List[torch.Tensor]: Reward predictions for all reward estimators/critics.
         """
-        # Pass obs to shared GRU layers, but no grad for separate pass
-        with torch.no_grad():
-            gru_output = self.forward_gru(obs, act)
+        # Get GRU output (using reward GRU if enabled, otherwise shared GRU)
+        gru_output = self.forward_gru(obs, act, use_reward_gru=True)
 
-        # print(f'{obs.shape=} {gru_output.shape=} {act.shape=}')
-
-        # Pass the concatenated GRU outputs to the reward estimator MLP
-        # act = act.squeeze(0)  # Seq x Feature
+        # Pass through reward MLP
         if self.is_value_critic:
             reward_pred = self.reward_critic(gru_output)
         else:
@@ -840,7 +831,8 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         act: Union[torch.Tensor, List[torch.Tensor]],
     ) -> Tuple[Union[Distribution, List[Distribution]], List[torch.Tensor]]:
         """
-        Forward pass through the actor and reward estimator networks, using the shared GRU layers to process observations and actions.
+        Forward pass through the actor and reward estimator networks.
+        When using separate GRUs, actor and reward heads use their own GRU layers.
         This method combines the outputs of both networks (actor and reward estimator) into a single forward pass.
         :param obs:
             Observation tensor of shape (Batch, Sequence, Feature) or a list of tensors.
@@ -854,23 +846,25 @@ class ConstraintActorDynamicsEstimator(nn.Module):
                 for multi-discrete action space.
                 - reward_pred: List of reward predictions for all reward estimators/critics.
         """
-        # Pass obs to shared GRU layers, grad is required for combined pass
-        gru_output = self.forward_gru(obs, act)
-
-        reward_features = gru_output.detach()
-
-        # Check if gru_output is NaN
-        if torch.isnan(gru_output).any():
-            raise ValueError("GRU output contains NaN values.")
-
-        # Pass the concatenated GRU outputs to the actor MLP
-        distribution: Union[Distribution, List[Distribution]] = self.actor(gru_output)
-
-        # Pass the concatenated GRU outputs to the reward estimator MLP
-        if self.is_value_critic:
-            reward_pred = self.reward_critic(reward_features)
+        if self._separate_reward_gru:
+            # Forward actor through its own GRU
+            distribution = self.forward_actor(obs, act)
+            # Forward reward through its own GRU
+            reward_pred = self.forward_reward(obs, act)
         else:
-            reward_pred = self.reward_critic(reward_features, act)  # Reward loss does not affect gru training
+            # Shared GRU behavior
+            gru_output = self.forward_gru(obs, act)
+            reward_features = gru_output.detach()
+
+            if torch.isnan(gru_output).any():
+                raise ValueError("GRU output contains NaN values.")
+
+            distribution = self.actor(gru_output)
+
+            if self.is_value_critic:
+                reward_pred = self.reward_critic(reward_features)
+            else:
+                reward_pred = self.reward_critic(reward_features, act)
 
         return distribution, reward_pred
 
