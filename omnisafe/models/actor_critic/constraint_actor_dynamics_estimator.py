@@ -815,7 +815,7 @@ class ConstraintActorDynamicsEstimator(nn.Module):
         :return: List[torch.Tensor]: Reward predictions for all reward estimators/critics.
         """
         # Get GRU output (using reward GRU if enabled, otherwise shared GRU)
-        gru_output = self.forward_gru(obs, act, use_reward_gru=True)
+        gru_output = self.forward_gru(obs, act, use_reward_gru=self._separate_reward_gru)
 
         # Pass through reward MLP
         if self.is_value_critic:
