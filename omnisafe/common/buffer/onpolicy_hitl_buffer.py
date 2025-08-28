@@ -7,7 +7,7 @@ from omnisafe.typing import DEVICE_CPU, OmnisafeSpace
 from omnisafe.utils.model import get_obs_dim, get_act_dim
 
 
-class OnPolicyHITLBuffer(BaseBuffer):
+class OnPolicyHitlBuffer(BaseBuffer):
     def __init__(
         self,
         obs_space: OmnisafeSpace,
@@ -143,7 +143,7 @@ def save_buffer_to_csv(data: dict[str, torch.Tensor], filename: str) -> None:
     pd.DataFrame(df_dict).to_csv(filename, index=False)
 
 
-def load_buffer_from_csv(filename: str, buffer: OnPolicyHITLBuffer) -> OnPolicyHITLBuffer:
+def load_buffer_from_csv(filename: str, buffer: OnPolicyHitlBuffer) -> OnPolicyHitlBuffer:
     """
     Load csv data as dict then initialize the buffer with the data.
 
