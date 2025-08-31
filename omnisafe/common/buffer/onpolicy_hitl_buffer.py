@@ -36,6 +36,8 @@ class OnPolicyHitlBuffer(BaseBuffer):
         self.ptr: int = 0
         self.path_start_idx: int = 0
         self.max_size: int = size
+        # Track per-episode lengths for cumulative datasets
+        self.episode_lengths: list[int] = []
 
     def store(self, **data: torch.Tensor) -> None:
         """Store single step data into the buffer.
@@ -109,11 +111,30 @@ class OnPolicyHitlBuffer(BaseBuffer):
             self.data[k][self.ptr:self.ptr + batch_len].copy_(v)
         self.ptr += batch_len
 
-    def get(self, reset: bool = True) -> dict[str, torch.Tensor]:
+    def register_episode(self, length: int) -> None:
+        """Register a newly added episode of given length (number of rows)."""
+        if length > 0:
+            self.episode_lengths.append(length)
+
+    def last_episode_mask(self) -> torch.Tensor:
+        """Return boolean mask over current buffer selecting ONLY last registered episode.
+        If no episode registered, returns all True (whole buffer treated as one episode)."""
+        total = self.ptr
+        mask = torch.zeros((total,), dtype=torch.bool, device=self.data['obs'].device)
+        if not self.episode_lengths or total == 0:
+            mask[:total] = True
+            return mask
+        last_len = self.episode_lengths[-1]
+        start = max(total - last_len, 0)
+        mask[start:total] = True
+        return mask
+
+    def get(self, reset: bool = True, return_last_episode_mask: bool = False) -> dict[str, torch.Tensor]:
         """
         Retrieve all data from the buffer and optionally reset it.
 
         :param reset: Whether to clear the buffer after getting the data.
+        :param return_last_episode_mask: Whether to return a mask for the last episode.
         :return: The dictionary containing all the data in the buffer.
         """
         data = {
@@ -130,10 +151,10 @@ class OnPolicyHitlBuffer(BaseBuffer):
             'next_obs': self.data['next_obs'][:self.ptr],
             'next_obs_pred': self.data['next_obs_pred'][:self.ptr],
         }
-
+        if return_last_episode_mask:
+            data['last_episode_mask'] = self.last_episode_mask()
         if reset:
             self.clear()
-
         return data
 
     @property
@@ -149,6 +170,7 @@ class OnPolicyHitlBuffer(BaseBuffer):
 
     def clear(self) -> None:
         self.path_start_idx, self.ptr = 0, 0
+        self.episode_lengths.clear()
 
 
 def save_buffer_to_csv(data: dict[str, torch.Tensor], filename: str) -> None:
@@ -191,6 +213,9 @@ def load_buffer_from_csv(filename: str, buffer: OnPolicyHitlBuffer) -> int:
             df[col] = df[col].map(ast.literal_eval)
 
     buffer.set(df)
+    # Reset episode tracking to a single episode of loaded length
+    buffer.episode_lengths.clear()
+    buffer.register_episode(len(df))
 
     return len(df)
 
@@ -209,6 +234,7 @@ def append_buffer_from_csv(filename: str, buffer: OnPolicyHitlBuffer) -> int:
     if df.empty:
         return 0
 
+    # Parse list-like string columns
     for col in df.columns:
         if df[col].dtype == 'object' and df[col].astype(str).str.startswith('[').all():
             try:
@@ -220,17 +246,19 @@ def append_buffer_from_csv(filename: str, buffer: OnPolicyHitlBuffer) -> int:
     assert num_rows <= buffer.remaining_capacity, (
         f'Not enough capacity to append {num_rows} rows; remaining {buffer.remaining_capacity}.')
 
+    # Build episode batch dict matching buffer.data shapes
     episode_data: dict[str, torch.Tensor] = {}
     for key in buffer.data.keys():
         assert key in df.columns, f"Missing column {key} in {filename}"
         col = df[key]
         if isinstance(col.iloc[0], list):
-            t = torch.tensor(col.tolist(), dtype=buffer.data[key].dtype, device=buffer.device)
+            t = torch.tensor(col.tolist(), dtype=buffer.data[key].dtype, device=buffer.data[key].device)
         else:
-            t = torch.tensor(col.values, dtype=buffer.data[key].dtype, device=buffer.device)
+            t = torch.tensor(col.values, dtype=buffer.data[key].dtype, device=buffer.data[key].device)
         episode_data[key] = t
-    buffer.add(episode_data)
 
+    buffer.add(episode_data)
+    buffer.register_episode(num_rows)
     return num_rows
 
 
