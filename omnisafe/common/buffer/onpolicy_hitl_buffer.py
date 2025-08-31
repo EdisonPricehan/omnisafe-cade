@@ -82,6 +82,33 @@ class OnPolicyHitlBuffer(BaseBuffer):
 
         self.ptr = num_rows  # update the buffer pointer
 
+    def add(self, data: dict[str, torch.Tensor]) -> None:
+        """Append a batch of data (multiple steps) into the buffer.
+
+        Args:
+            data: Dictionary of tensors with the same keys as self.data. First dimension must be the batch length.
+        Raises:
+            AssertionError: If remaining capacity is insufficient or keys mismatch / shape mismatch.
+        """
+        if not data:
+            return
+        # Infer length from one of the mandatory keys
+        first_key = next(iter(data))
+        batch_len = data[first_key].shape[0]
+        assert self.ptr + batch_len <= self.max_size, (
+            f'Insufficient capacity in buffer: have {self.remaining_capacity} slots, need {batch_len}. '
+            f'Consider allocating a larger buffer.'
+        )
+        for k, v in data.items():
+            assert k in self.data, f'Key {k} not found in buffer.'
+            assert v.shape[0] == batch_len, f'Inconsistent batch length for key {k}: {v.shape[0]} vs {batch_len}.'
+            # Broadcast / shape check except first dim
+            expected_shape = self.data[k][self.ptr:self.ptr + batch_len].shape
+            assert v.shape == expected_shape, (
+                f'Shape mismatch for key {k}: expected {expected_shape}, got {v.shape}.')
+            self.data[k][self.ptr:self.ptr + batch_len].copy_(v)
+        self.ptr += batch_len
+
     def get(self, reset: bool = True) -> dict[str, torch.Tensor]:
         """
         Retrieve all data from the buffer and optionally reset it.
@@ -113,6 +140,10 @@ class OnPolicyHitlBuffer(BaseBuffer):
     def data_size(self) -> int:
         return self.ptr
 
+    @property
+    def remaining_capacity(self) -> int:
+        return self.max_size - self.ptr
+
     def full(self) -> bool:
         return self.ptr >= self.max_size
 
@@ -143,16 +174,16 @@ def save_buffer_to_csv(data: dict[str, torch.Tensor], filename: str) -> None:
     pd.DataFrame(df_dict).to_csv(filename, index=False)
 
 
-def load_buffer_from_csv(filename: str, buffer: OnPolicyHitlBuffer) -> OnPolicyHitlBuffer:
+def load_buffer_from_csv(filename: str, buffer: OnPolicyHitlBuffer) -> int:
     """
-    Load csv data as dict then initialize the buffer with the data.
+    Load csv data as dict then initialize the buffer with the data (in-place).
 
     Args:
         filename: Path to csv file.
-        buffer: An inited but empty buffer.
+        buffer: An initialized but empty (or to-be-overwritten) buffer.
 
     Returns:
-        The buffer with data loaded from csv file.
+        number_of_rows_loaded (int). Buffer is updated in-place.
     """
     df = pd.read_csv(filename)
     for col in df.columns:
@@ -161,7 +192,46 @@ def load_buffer_from_csv(filename: str, buffer: OnPolicyHitlBuffer) -> OnPolicyH
 
     buffer.set(df)
 
-    return buffer
+    return len(df)
+
+
+def append_buffer_from_csv(filename: str, buffer: OnPolicyHitlBuffer) -> int:
+    """Append data from a CSV file into an existing buffer without clearing existing data.
+
+    Args:
+        filename: Path to csv file.
+        buffer: Existing buffer (may already contain data). Must have enough remaining capacity.
+
+    Returns:
+        Number of rows appended.
+    """
+    df = pd.read_csv(filename)
+    if df.empty:
+        return 0
+
+    for col in df.columns:
+        if df[col].dtype == 'object' and df[col].astype(str).str.startswith('[').all():
+            try:
+                df[col] = df[col].map(ast.literal_eval)
+            except Exception:
+                pass
+
+    num_rows = len(df)
+    assert num_rows <= buffer.remaining_capacity, (
+        f'Not enough capacity to append {num_rows} rows; remaining {buffer.remaining_capacity}.')
+
+    episode_data: dict[str, torch.Tensor] = {}
+    for key in buffer.data.keys():
+        assert key in df.columns, f"Missing column {key} in {filename}"
+        col = df[key]
+        if isinstance(col.iloc[0], list):
+            t = torch.tensor(col.tolist(), dtype=buffer.data[key].dtype, device=buffer.device)
+        else:
+            t = torch.tensor(col.values, dtype=buffer.data[key].dtype, device=buffer.device)
+        episode_data[key] = t
+    buffer.add(episode_data)
+
+    return num_rows
 
 
 if __name__ == '__main__':
@@ -171,17 +241,12 @@ if __name__ == '__main__':
     csv_filename: str = '../../../examples/evaluations/riverine/medium_hitlTrue_seed000_difficulty1_episode0.csv'
     obs_space: OmnisafeSpace = MultiBinary(256)
     act_space: OmnisafeSpace = MultiDiscrete([3, 3, 3, 3])
-    buffer: OnPolicyHITLBuffer = OnPolicyHITLBuffer(
+    buffer: OnPolicyHitlBuffer = OnPolicyHitlBuffer(
         obs_space=obs_space,
         act_space=act_space,
         size=1000,
     )
 
-    buffer = load_buffer_from_csv(filename=csv_filename, buffer=buffer)
-    print(f'{buffer.data_size=}')
-    print(f'{buffer.data["act"][:5]=}')
-
-
-
-
-
+    rows = load_buffer_from_csv(filename=csv_filename, buffer=buffer)
+    print(f'buffer.data_size={buffer.data_size}, rows_loaded={rows}')
+    print(f'act first 5={buffer.data["act"][:5]}')
