@@ -4,6 +4,7 @@ import json
 import time
 import csv
 import re
+import random
 from datetime import datetime
 import cv2
 import numpy as np
@@ -158,6 +159,9 @@ class HitlCade:
                 self.segmentation_engine = PerceptionInfer(engine_path=segmentation_engine_path)
                 logger.info(f'Segmentation engine loaded from {segmentation_engine_path}.')
 
+        # Set random seed
+        self.set_seed(int(self.seed))
+
         # Init the buffer
         self.buffer = OnPolicyHitlBuffer(
             obs_space=self.obs_space,
@@ -182,6 +186,27 @@ class HitlCade:
         if self.enable_hitl and self.env is not None:
             self.k2a = Key2ActionDrone()  # TODO only support drone for now
             logger.info(f'Human-in-the-loop keyboard interruption is enabled.')
+
+    def set_seed(self, seed: Optional[int] = None):
+        """Set seeds for all random number generators to ensure reproducibility."""
+        if seed is None:
+            seed = int(self.seed)
+
+        # Set seeds for Python, NumPy and PyTorch
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+        # Set environment seed if available
+        if self.env is not None and hasattr(self.env, 'seed'):
+            self.env.seed(seed)
+
+        logger.info(f'Random seed set to {seed}')
 
     @staticmethod
     def gen_obs_space() -> OmnisafeSpace:
