@@ -120,7 +120,7 @@ class OnPolicyHitlBuffer(BaseBuffer):
         """Return boolean mask over current buffer selecting ONLY last registered episode.
         If no episode registered, returns all True (whole buffer treated as one episode)."""
         total = self.ptr
-        mask = torch.zeros((total,), dtype=torch.bool, device=self.data['obs'].device)
+        mask = torch.zeros((total,), dtype=torch.bool, device=self._device)
         if not self.episode_lengths or total == 0:
             mask[:total] = True
             return mask
@@ -150,11 +150,15 @@ class OnPolicyHitlBuffer(BaseBuffer):
             'done': self.data['done'][:self.ptr],
             'next_obs': self.data['next_obs'][:self.ptr],
             'next_obs_pred': self.data['next_obs_pred'][:self.ptr],
+            'episode_lengths': torch.tensor(self.episode_lengths, dtype=torch.int32, device=self._device),
         }
+
         if return_last_episode_mask:
             data['last_episode_mask'] = self.last_episode_mask()
+
         if reset:
             self.clear()
+
         return data
 
     @property
