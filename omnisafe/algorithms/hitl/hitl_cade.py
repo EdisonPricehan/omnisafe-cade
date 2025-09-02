@@ -698,6 +698,64 @@ class HitlCade:
         finally:
             self.keyboard_control.close()
 
+    def _batchify_by_episode(
+        self,
+        obs_flat: torch.Tensor,  # [N, obs_dim]
+        act_flat: torch.Tensor,  # [N, act_dim]
+        done_flat: torch.Tensor,  # [N] bool; True at terminal steps
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Reshape flat (time-concatenated) tensors into episode-batched, time-padded tensors.
+
+        Inputs:
+            obs_flat  : [N, obs_dim] observations in chronological order across episodes
+            act_flat  : [N, act_dim] actions aligned with obs_flat
+            done_flat : [N] bool, True at the last step of each episode
+
+        Returns:
+            obs_pad : [E, T_max, obs_dim] observations, padded with zeros on the right
+            act_pad : [E, T_max, act_dim] actions, padded with zeros on the right
+            lengths : [E] int64, number of valid (unpadded) steps per episode
+
+        Notes:
+            - Padding is right-justified per episode (i.e., positions [:lengths[e]] are valid).
+            - Use `lengths` to mask out padded positions after GRU.
+        """
+        device = obs_flat.device
+        N = obs_flat.shape[0]
+        assert act_flat.shape[0] == N and done_flat.shape[0] == N, "Mismatched lengths."
+
+        # Episode starts: first step or step after a terminal
+        start = torch.zeros(N, dtype=torch.bool, device=device)
+        start[0] = True
+        start[1:] = done_flat[:-1]
+
+        # Episode ids 0..E-1
+        ep_id = torch.cumsum(start.int(), dim=0) - 1
+        E = int(ep_id.max().item()) + 1
+
+        # Lengths and max length
+        lengths = torch.bincount(ep_id, minlength=E)  # [E]
+        T_max = int(lengths.max().item())
+
+        obs_dim = obs_flat.shape[-1]
+        act_dim = act_flat.shape[-1]
+
+        # Allocate padded tensors
+        obs_pad = obs_flat.new_zeros((E, T_max, obs_dim))
+        act_pad = act_flat.new_zeros((E, T_max, act_dim))
+
+        # Fill per-episode slices
+        for e in range(E):
+            idx_e = torch.nonzero(ep_id == e, as_tuple=False).squeeze(1)
+            Te = idx_e.numel()
+            if Te == 0:
+                continue
+            obs_pad[e, :Te] = obs_flat[idx_e]
+            act_pad[e, :Te] = act_flat[idx_e]
+
+        return obs_pad, act_pad, lengths
+
     def retrain(
         self,
         data: dict[str, torch.Tensor],
@@ -720,14 +778,21 @@ class HitlCade:
         act_overlaid = data['act_overlaid']
         logp = data['logp']  # logp of agent actions
         done = data['done'].bool()
+        last_episode_mask = data.get('last_episode_mask', None)
+
+        # Pack multiple episodes data for gru's inputs
+        obs_batched, act_batched, ep_lens = self._batchify_by_episode(obs, act, done)
+        logger.warning(f'{ep_lens=}')
 
         # Filter out done data samples (usually end of an episode in simulation)
-        if self.env is not None:
-            obs = obs[~done]
-            act = act[~done]
-            act_agent = act_agent[~done]
-            act_overlaid = act_overlaid[~done]
-            logp = logp[~done]
+        # if self.env is not None:
+        #     obs = obs[~done]
+        #     act = act[~done]
+        #     act_agent = act_agent[~done]
+        #     act_overlaid = act_overlaid[~done]
+        #     logp = logp[~done]
+        #     if last_episode_mask is not None:
+        #         last_episode_mask = last_episode_mask[~done]
 
         # Update SDM in real world (no need to train in sim since sdm already converged)
         if self.env is None:
@@ -749,8 +814,18 @@ class HitlCade:
 
         # Get initial policy and reward prediction (before epoch 0)
         with torch.no_grad():
-            init_distribution, init_reward_pred = self.cade.forward_actor_reward(obs, act)
+            if self.loss_type == 'CAPER' and caper_use_last_episode and last_episode_mask is not None:
+                init_distribution = self.cade.forward_actor(obs[last_episode_mask], act[last_episode_mask])
+            else:
+                init_distribution = self.cade.forward_actor(obs_batched, act_batched, ep_lens)
         assert isinstance(init_distribution, List), f'Currently only support multi-discrete action space.'
+
+        # Store the data (episodes up to now) for CAPER retraining of reward estimator
+        obs_full = obs.clone()
+        act_full = act.clone()
+        act_agent_full = act_agent.clone()
+        act_overlaid_full = act_overlaid.clone()
+        # logp_full = logp.clone()
 
         for e in range(epoch if epoch is not None else self.retrain_epoch):
             # Zero gradients
@@ -761,10 +836,22 @@ class HitlCade:
             # Calculate loss based on different HITL loss types
             if self.loss_type == 'CAPER':
                 # First update reward estimator (uses only corrective pairs internally)
-                reward_loss = self.calc_reward_estimator_loss(obs, act, act_agent, act_overlaid)
+                # reward_loss = self.calc_reward_estimator_loss(obs, act, act_agent, act_overlaid)
+                reward_loss = self.calc_reward_estimator_loss(obs_full, act_full, act_agent_full, act_overlaid_full)
                 reward_loss.backward()
                 self.cade.reward_critic_optimizer.step()  # TODO assume shared gru
                 logger.info('Training of reward estimator is done.')
+
+                # Use the most recent episode data to update policy
+                if caper_use_last_episode and last_episode_mask is not None and e == 0:
+                    obs = obs[last_episode_mask]
+                    act = act[last_episode_mask]
+                    act_agent = act_agent[last_episode_mask]
+                    act_overlaid = act_overlaid[last_episode_mask]
+                    logp = logp[last_episode_mask]
+                    if not act_overlaid.any():
+                        logger.warning('No human corrections in the last episode; skip CAPER policy update this epoch.')
+                        continue
 
                 # Policy update only on non-intervened steps
                 non_intervened_mask = (act_overlaid == 0)
@@ -772,38 +859,47 @@ class HitlCade:
                     logger.warning('All steps are human intervened; skip CAPER policy update this epoch.')
                     continue
 
-                if freeze_gru:  # Only update heads
-                    distribution = self.cade.forward_actor(obs, act)
-                    reward_pred = self.cade.forward_reward(obs, act)
-                else:
-                    distribution, reward_pred = self.cade.forward_actor_reward(obs, act)
+                if caper_use_last_episode:
+                    obs_batched, act_batched = obs.clone().unsqueeze(0), act.clone().unsqueeze(0)
 
-                if caper_use_non_intervened_only:
-                    # Advantage computed on subset only (exclude intervened transitions)
-                    reward_adv = self.calc_reward_adv(reward_pred[0][non_intervened_mask])
-                    loss = self.policy_loss_by_hitl_reward(
-                        distribution,
-                        init_distribution,
-                        act,
-                        logp,
-                        reward_adv,
-                        mask=non_intervened_mask,
-                    )
-                else:  # use all data for policy update
-                    reward_adv = self.calc_reward_adv(reward_pred[0])
-                    loss = self.policy_loss_by_hitl_reward(
-                        distribution,
-                        init_distribution,
-                        act,
-                        logp,
-                        reward_adv,
-                        mask=None,
-                    )
-            elif self.loss_type == 'COACH':  # COACH
                 if freeze_gru:  # Only update heads
-                    distribution = self.cade.forward_actor(obs, act)
+                    distribution = self.cade.forward_actor(obs_batched, act_batched,
+                                                           ep_lens=None if caper_use_last_episode else ep_lens)
+                    reward_pred = self.cade.forward_reward(obs_batched, act_batched,
+                                                           ep_lens=None if caper_use_last_episode else ep_lens)
                 else:
-                    distribution, _ = self.cade.forward_actor_reward(obs, act)
+                    distribution, reward_pred = self.cade.forward_actor_reward(obs_batched, act_batched,
+                                                                ep_lens=None if caper_use_last_episode else ep_lens)
+
+                # Calculate reward-to-go advantage
+                reward_adv = self.calc_reward_adv(reward_pred[0])
+
+                # Calculate policy loss
+                loss = self.policy_loss_by_hitl_reward(
+                    distribution,
+                    init_distribution,
+                    act,
+                    logp,
+                    reward_adv,
+                    mask=non_intervened_mask if caper_use_non_intervened_only else None,
+                )
+
+                if caper_use_bt:
+                    # Add BT loss on intervened steps
+                    bt_loss = self.bt_loss(
+                        distribution,
+                        act,
+                        act_agent,
+                        act_overlaid,
+                    )
+                    logger.warning(f'focops loss: {loss.item():.3f}, bt loss: {bt_loss.item():.3f}')
+                    loss += bt_loss  # add BT loss  # TODO need a weight?
+
+            elif self.loss_type == 'COACH':
+                if freeze_gru:  # Only update heads
+                    distribution = self.cade.forward_actor(obs_batched, act_batched, ep_lens)
+                else:
+                    distribution, _ = self.cade.forward_actor_reward(obs_batched, act_batched, ep_lens)
                 reward_adv_full = self.calc_reward_adv_coach(act_overlaid)
                 loss = self.policy_loss_by_hitl_reward(
                     distribution,
@@ -814,9 +910,9 @@ class HitlCade:
                 )
             else:
                 if freeze_gru:  # Only update heads
-                    distribution = self.cade.forward_actor(obs, act)
+                    distribution = self.cade.forward_actor(obs_batched, act_batched, ep_lens)
                 else:
-                    distribution, _ = self.cade.forward_actor_reward(obs, act)
+                    distribution, _ = self.cade.forward_actor_reward(obs_batched, act_batched, ep_lens)
 
                 if self.loss_type == 'HG-DAgger':
                     loss = self.weighted_bc_loss(distribution, act, act_overlaid, hg_dagger=True)
@@ -833,7 +929,8 @@ class HitlCade:
             loss.backward()
 
             # Update recurrent and policy parameters
-            self.cade.gru_optimizer.step()
+            if not freeze_gru:
+                self.cade.gru_optimizer.step()
             self.cade.actor_optimizer.step()
 
         logger.info(f'Retraining for episode {self.ep_num} of loss {self.loss_type} for {epoch} epochs is done.')
@@ -1107,6 +1204,8 @@ class HitlCade:
         focops_lam = self.cfgs.algo_cfgs.focops_lam
         focops_eta = self.cfgs.algo_cfgs.focops_eta
         loss_vec = (kl - (1 / focops_lam) * ratio * adv) * (kl.detach() <= focops_eta).float()
+        # loss_vec = (-ratio * adv) * (kl.detach() <= focops_eta).float()  # TODO remove kl term?
+        # loss_vec = -ratio * adv  # TODO remove kl entirely?
         return loss_vec.mean()
 
     def weighted_bc_loss(
@@ -1203,7 +1302,6 @@ class HitlCade:
             loss: Calculated policy loss.
         """
         total_loss = torch.tensor(0.0, dtype=torch.float32, device=act.device)
-        act_branches = len(policy_distributions)
 
         # Filter human intervened samples
         filtered = self.filter(policy_distributions,
@@ -1436,7 +1534,7 @@ def integral_retrain(
                 continue
             cumulative_loaded_rows += rows_appended
             logger.info(f'Loaded episode {ep_id} with {rows_appended} steps (cumulative={cumulative_loaded_rows}).')
-            hitl_cade.retrain(hitl_cade.buffer.get(reset=False), epoch=retrain_epoch)
+            hitl_cade.retrain(hitl_cade.buffer.get(reset=False, return_last_episode_mask=True), epoch=retrain_epoch)
         else:
             # load single episode csv into existing buffer (in-place)
             rows_loaded = load_buffer_from_csv(filename=ep_path, buffer=hitl_cade.buffer)
@@ -1881,8 +1979,8 @@ if __name__ == '__main__':
 
     # Specify which HITL loss to use during retraining
     # Choose from {'None', 'IWR', 'HG-DAgger', 'BT', 'DPO', 'COACH', 'CAPER'}
-    loss_type: LossType = 'None'
-    # loss_type: LossType = 'CAPER'
+    # loss_type: LossType = 'None'
+    loss_type: LossType = 'CAPER'
     # loss_type: LossType = 'IWR'
     # loss_type: LossType = 'HG-DAgger'
     # loss_type: LossType = 'BT'
@@ -1899,9 +1997,11 @@ if __name__ == '__main__':
     save_ckpts: bool = True  # Whether save checkpoints of retrained CADE
     use_cumulative_buffer: bool = True  # Whether use cumulative buffer for integral retrain
     caper_use_non_intervened_only: bool = True  # Whether use non-intervened actions only in CAPER loss calculation
+    caper_use_last_episode: bool = False  # Whether use the last episode only in CAPER for policy loss calculation
+    caper_use_bt: bool = True  # Whether use BT loss in CAPER
     freeze_gru: bool = True  # Whether freeze GRU parameters during retraining
 
-    evaluate: bool = False  # Whether evaluate the trained policy or test the retrain function
+    evaluate: bool = True  # Whether evaluate the trained policy or test the retrain function
     evaluate_single: bool = False  # Whether evaluate single CADE model or multiple CADE models
     retrain_single: bool = False  # Whether retrain from single episodes or multiple episodes (integral retrain)
     plot_comp: bool = False  # Whether plot statistic comparisons
