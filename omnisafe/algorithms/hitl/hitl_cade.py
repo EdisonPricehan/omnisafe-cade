@@ -75,6 +75,7 @@ class HitlCade:
         enable_hitl: bool = True,
         enable_retrain: bool = True,
         load_buffer_at_init: bool = False,
+        spar_h_alpha: float = 1.,  # Only used when loss_type is SPAR-H
         device: Union[torch.device, str] = 'cpu',  # Device to run the model on, e.g., 'cuda:0' or 'cpu'
         debug: bool = False,
     ):
@@ -100,6 +101,7 @@ class HitlCade:
             enable_hitl: Whether to enable human-in-the-loop during evaluation.
             enable_retrain: Whether to enable retraining of CADE during evaluation.
             load_buffer_at_init: Whether to load existing buffer data at initialization, effective during deployment.
+            spar_h_alpha: alpha parameter for SPAR-H loss, only used when loss_type is 'SPAR-H'.
             device: Device to run the model on, e.g., 'cuda:0' or 'cpu'.
             debug: Whether to enable debug mode, which checks real world GPS signal in keyboard control.
         """
@@ -122,6 +124,7 @@ class HitlCade:
         self.enable_hitl: bool = enable_hitl
         self.enable_retrain: bool = enable_retrain
         self.load_buffer_at_init: bool = load_buffer_at_init
+        self.spar_h_alpha: float = spar_h_alpha
         self.device: Union[torch.device, str] = device
         self.debug: bool = debug
 
@@ -896,8 +899,8 @@ class HitlCade:
         num_human_corrections = act_overlaid.sum().item()
         logger.info(f'Number of human corrections in episode {self.ep_num}: {int(num_human_corrections)}')
 
-        # Get initial policy and reward prediction (before epoch 0)
-        with (torch.no_grad()):
+        # Get initial policy (before epoch 0)
+        with torch.no_grad():
             if ((self.loss_type == 'SPAR-H' or self.loss_type == 'SPAR-R')
                 and spar_use_last_episode
                 and last_episode_mask is not None):
@@ -979,8 +982,7 @@ class HitlCade:
                         act_overlaid,
                     )
                     logger.warning(f'focops loss: {loss.item():.3f}, bt loss: {bt_loss.item():.3f}')
-                    loss += bt_loss  # add BT loss  # TODO need a weight?
-
+                    loss += self.spar_h_alpha * bt_loss  # add BT loss
             elif self.loss_type == 'COACH':
                 if freeze_gru:  # Only update heads
                     distribution = self.cade.forward_actor(obs_batched, act_batched, ep_lens)
