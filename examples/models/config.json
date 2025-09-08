@@ -1,14 +1,14 @@
 {
-    "seed": 0,
+    "seed": 42,
     "train_cfgs": {
-        "device": "cuda:0",
-        "torch_threads": 1,
+        "device": "cpu",
+        "torch_threads": 16,
         "vector_env_nums": 1,
         "parallel": 1,
-        "total_steps": 200000,
+        "total_steps": 500000,
         "max_episode_steps": 500,
         "render_mode": "None",
-        "epochs": 400
+        "epochs": 1000
     },
     "algo_cfgs": {
         "steps_per_epoch": 500,
@@ -16,14 +16,14 @@
         "batch_size": 64,
         "ep_batch_size": 4,
         "ep_padding": false,
-        "target_kl": 1.0,
+        "target_kl": 0.02,
         "entropy_coef": 0.0,
         "reward_normalize": false,
         "cost_normalize": false,
         "obs_normalize": false,
         "kl_early_stop": true,
         "kl_continue_other": true,
-        "focops_eta": 1.0,
+        "focops_eta": 0.05,
         "focops_lam": 1.5,
         "use_max_grad_norm": true,
         "max_grad_norm": 40.0,
@@ -38,10 +38,10 @@
         "adv_estimation_method": "subm",
         "standardized_rew_adv": true,
         "standardized_cost_adv": false,
-        "ep_ret_window_size": 10,
+        "ep_ret_window_size": 20,
         "penalty_coef": 0.0,
         "use_cost": true,
-        "use_lagrangian": true,
+        "use_lagrangian": false,
         "use_sdm": true,
         "use_safety_layer": false,
         "safety_layer_use_reward": false,
@@ -49,7 +49,7 @@
     },
     "logger_cfgs": {
         "use_wandb": true,
-        "wandb_project": "cade-sre-medium-terminal-cost-only",
+        "wandb_project": "cade-sre-medium-discrete-action-space",
         "use_tensorboard": true,
         "save_model_freq": 50,
         "log_dir": "./runs",
@@ -58,6 +58,7 @@
     "model_cfgs": {
         "weight_initialization_mode": "kaiming_uniform",
         "actor_type": "latent_multi_discrete",
+        "separate_reward_gru": false,
         "latent_size": 64,
         "num_gru_layers": 1,
         "gru_lr": 0.0003,
@@ -68,6 +69,7 @@
             0.1
         ],
         "disable_no_op": false,
+        "first_non_no_op_win": true,
         "actor": {
             "hidden_sizes": [
                 64,
@@ -92,11 +94,12 @@
             "activation": "tanh",
             "lr": 0.001,
             "horizon": 1,
-            "horizon_cost_threshold": 0.5,
+            "horizon_cost_threshold": 0.3,
             "traj_sampling_num": 10,
             "discount_factor": 0.95,
             "engage_after_epochs": 150
-        }
+        },
+        "block_backward_action": true
     },
     "lagrange_cfgs": {
         "cost_limit": 0.5,
@@ -105,7 +108,7 @@
         "lambda_optimizer": "Adam",
         "lagrangian_upper_bound": 2.0
     },
-    "exp_name": "FOCOPS_CACD-{medium}",
+    "exp_name": "FOCOPS_CADE-{medium}",
     "env_id": "medium",
-    "algo": "FOCOPS_CACD"
+    "algo": "FOCOPS_CADE"
 }

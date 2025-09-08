@@ -67,12 +67,14 @@ class HitlCade:
         save_buffer: bool = True,
         difficulty: int = 1,
         buffer_size: int = 1000,
+        max_ep_len: int = 10,
         retrain_epoch: int = 3,
         loss_type: LossType = 'None',  # None means no hitl loss
         save_ckpts: bool = False,
         render_mode: Optional[str] = 'human',
         enable_hitl: bool = True,
         enable_retrain: bool = True,
+        load_buffer_at_init: bool = False,
         device: Union[torch.device, str] = 'cpu',  # Device to run the model on, e.g., 'cuda:0' or 'cpu'
         debug: bool = False,
     ):
@@ -90,12 +92,14 @@ class HitlCade:
             save_buffer: whether to save per-step result of evaluations.
             difficulty: Explicit integer of difficulty level, has to be in range [0, 2], where 0 is easy and 2 is hard.
             buffer_size: Buffer size of per-episode data.
+            max_ep_len: Maximum episode length, for deployment time use only.
             retrain_epoch: number of epochs to retrain the CADE using the buffered episodic data.
             loss_type: human-in-the-loop loss type.
             save_ckpts: whether to save the checkpoints of retrained CADE model
             render_mode: render mode of the environment.
             enable_hitl: Whether to enable human-in-the-loop during evaluation.
             enable_retrain: Whether to enable retraining of CADE during evaluation.
+            load_buffer_at_init: Whether to load existing buffer data at initialization, effective during deployment.
             device: Device to run the model on, e.g., 'cuda:0' or 'cpu'.
             debug: Whether to enable debug mode, which checks real world GPS signal in keyboard control.
         """
@@ -110,12 +114,14 @@ class HitlCade:
         self.save_buffer: bool = save_buffer
         self.difficulty: int = difficulty
         self.buffer_size: int = buffer_size
+        self.max_ep_len: int = max_ep_len
         self.retrain_epoch: int = retrain_epoch
         self.loss_type: LossType = loss_type
         self.save_ckpts: bool = save_ckpts
         self.render_mode: Optional[str] = render_mode
         self.enable_hitl: bool = enable_hitl
         self.enable_retrain: bool = enable_retrain
+        self.load_buffer_at_init: bool = load_buffer_at_init
         self.device: Union[torch.device, str] = device
         self.debug: bool = debug
 
@@ -133,7 +139,6 @@ class HitlCade:
             else:
                 self.seed: str = '000'  # Default seed if not specified in model_dir
             env_name: str = 'real' if self.env_id is None else self.env_id  # 'real' for real-world riverine environment
-            # TODO unify the filenames for sim and real
             stat_file_name: str = f'{env_name}_hitl{self.enable_hitl}_seed{self.seed}_difficulty{self.difficulty}_loss{self.loss_type}.csv'
             self.stat_file_path: str = os.path.join(self.save_path, stat_file_name)
 
@@ -171,6 +176,10 @@ class HitlCade:
             device=self.device,
         )
 
+        # Scan and load historical buffer data if available during deployment
+        if self.env_id is None and self.load_buffer_at_init:
+            self.load_buffer_from_files()
+
         # Load model configs (but only algo_cfgs and model_cfgs are used)
         self.cfgs: Config = self.load_cfgs()
 
@@ -187,6 +196,56 @@ class HitlCade:
         if self.enable_hitl and self.env is not None:
             self.k2a = Key2ActionDrone()  # TODO only support drone for now
             logger.info(f'Human-in-the-loop keyboard interruption is enabled.')
+
+    def load_buffer_from_files(self) -> int:
+        """
+        For real-world runs, optionally preload previously saved per-episode CSVs into the buffer
+        so retraining will use all historical data.
+        Returns:
+            total_appended: Total number of rows appended into the buffer.
+        """
+        try:
+            if self.save_path is not None and os.path.isdir(self.save_path):
+                episode_files: List[str] = []
+                for entry in os.scandir(self.save_path):
+                    if not entry.is_file():
+                        continue
+                    name = entry.name
+                    if not name.endswith('.csv'):
+                        continue
+                    # Real-world saved files look like: real_hitl{...}_loss{...}_episode{xxx}_<timestamp>.csv
+                    if 'real_hitl' not in name or 'episode' not in name:
+                        continue
+                    episode_files.append(entry.path)
+
+                # Sort by extracted episode id (then fallback to name) for deterministic order
+                try:
+                    episode_files.sort(key=lambda p: (extract_episode_id(p, key='episode'), os.path.basename(p)))
+                except Exception:
+                    episode_files.sort()
+
+                total_appended = 0
+                for csv_path in episode_files:
+                    if self.buffer.full():
+                        logger.info(f'Buffer is full; stopped preloading at {total_appended} appended rows.')
+                        break
+                    try:
+                        appended = append_buffer_from_csv(csv_path, self.buffer)
+                        total_appended += appended
+                        logger.info(
+                            f'Preloaded {appended} rows from {os.path.basename(csv_path)} (total={total_appended}).')
+                    except Exception as e:
+                        logger.warning(f'Failed to append {csv_path}: {e}')
+                if total_appended > 0:
+                    logger.info(
+                        f'Finished preloading {total_appended} historical rows into buffer from {self.save_path}.')
+                return total_appended
+            else:
+                logger.debug('No save_path provided or directory missing; skipping historical preload.')
+                return 0
+        except Exception as e:
+            logger.warning(f'Error while scanning/preloading historical buffer data: {e}')
+            return 0
 
     def set_seed(self, seed: Optional[int] = None):
         """Set seeds for all random number generators to ensure reproducibility."""
@@ -692,7 +751,8 @@ class HitlCade:
                     next_obs_pred=next_obs_pred,
                 )
 
-                if ep_reset or self.buffer.full():  # Episode terminated by human
+                step += 1
+                if ep_reset or step == self.max_ep_len:  # Episode terminated by human or reached max length
                     logger.info(f'Episode {self.ep_num} terminated with {step} steps.')
 
                     # Reset recursive variables
@@ -714,9 +774,8 @@ class HitlCade:
                     self.ep_num += 1
 
                     # Clear the buffer
-                    self.buffer.clear()  # TODO Might allow buffer to store multiple episodes data?
-                else:  # Episode not terminated, continue navigation
-                    step += 1
+                    # Do not clear buffer during deployment to keep all data for training
+                    # self.buffer.clear()
         except KeyboardInterrupt:
             print(f'Program interrupted by user.')
         except Exception as e:
@@ -2102,8 +2161,4 @@ if __name__ == '__main__':
 
             # Plot all loss types together
             plot_all_loss_type_ckpt_rewards(metrics_dir=save_path, plot_ratio=False, diagonal_only=True)
-
-
-
-
 

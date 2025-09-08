@@ -20,9 +20,11 @@ class HitlCadeDeploy:
         self,
         model_dir: str,
         model_name: str,
+        stats_save_dir: str,
         segmentation_engine_path: Optional[str] = None,
-        loss_type: LossType = 'Indirect',
+        loss_type: LossType = 'SPAR-H',
         buffer_size: int = 1000,
+        ep_len: int = 10,
     ):
         # Initialize the HITL Cade algorithm
         self.hitl_cade = HitlCade(
@@ -30,16 +32,18 @@ class HitlCadeDeploy:
             model_name=model_name,
             segmentation_engine_path=segmentation_engine_path,
             eval_episodes=3,
-            deterministic=True,
-            save_path=os.path.join(model_dir, 'hitl_cade_deploy'),
+            deterministic=False,
+            save_path=os.path.join(model_dir, stats_save_dir),
             save_buffer=True,
             buffer_size=buffer_size,
-            retrain_epoch=3,
+            max_ep_len=ep_len,
+            retrain_epoch=10,
             loss_type=loss_type,
             save_ckpts=True,
             render_mode=None,
             enable_hitl=True,
             enable_retrain=True,
+            load_buffer_at_init=True,
             device='cuda:0',
             debug=False,
         )
@@ -50,20 +54,28 @@ class HitlCadeDeploy:
 
 
 if __name__ == "__main__":
-    # Set constants
+    # Set dir that stores pre-trained models, and will be stored with stats and retrained models
     model_dir: str = '/home/orin-nano/omnisafe-cade/examples/models'
-    model_name: str = 'epoch-350.pt'
+
+    # The initial model name. For deployment, it should be the latest model trained with HITL CADE.
+    model_name: str = 'epoch-1000.pt'  # Pre-trained novice policy name
+
+    # Directory to save stats and retrained models. Specify the exact name with date and time for each deployment.
+    stats_save_dir: str = 'hitl_cade_deploy/wabash_0908'
+
     # segmentation_engine_path: str = '/home/orin-nano/Aerial-Fluvial-Semantic-Segmentation/src/models/unet-resnet34-128x128-fp16.trt'
     segmentation_engine_path = None  # Will use SAM2 for segmentation
-    loss_type: LossType = 'Indirect'  # or 'IWR' for Intervention Weighted Regression
+    loss_type: LossType = 'SPAR-H'
 
     # Initialize the HITL Cade deployment
     hitl_cade_deploy = HitlCadeDeploy(
         model_dir=model_dir,
         model_name=model_name,
+        stats_save_dir=stats_save_dir,
         segmentation_engine_path=segmentation_engine_path,
         loss_type=loss_type,
-        buffer_size=10,
+        # buffer_size=10,
+        ep_len=10,
     )
 
     # Run the HITL Cade inference
