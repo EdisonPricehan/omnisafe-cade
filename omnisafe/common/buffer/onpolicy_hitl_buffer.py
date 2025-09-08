@@ -150,7 +150,7 @@ class OnPolicyHitlBuffer(BaseBuffer):
             'done': self.data['done'][:self.ptr],
             'next_obs': self.data['next_obs'][:self.ptr],
             'next_obs_pred': self.data['next_obs_pred'][:self.ptr],
-            'episode_lengths': torch.tensor(self.episode_lengths, dtype=torch.int32, device=self._device),
+            # 'episode_lengths': torch.tensor(self.episode_lengths, dtype=torch.int32, device=self._device),
         }
 
         if return_last_episode_mask:
@@ -191,12 +191,22 @@ def save_buffer_to_csv(data: dict[str, torch.Tensor], filename: str) -> None:
     assert filename != '', f'Empty filename is not allowed!'
 
     df_dict = {}
+    lengths_check = {}
     for k, v in data.items():
         arr = v.detach().cpu().numpy()
         if arr.ndim == 2 and arr.shape[1] == 1:
-            df_dict[k] = arr.squeeze().tolist()
+            col = arr.squeeze().tolist()
         else:
-            df_dict[k] = [arr[i].tolist() for i in range(arr.shape[0])]
+            col = [arr[i].tolist() for i in range(arr.shape[0])]
+        df_dict[k] = col
+        lengths_check[k] = len(col)
+    # Defensive check: all columns must have equal length for pandas DataFrame
+    if len(set(lengths_check.values())) > 1:
+        raise ValueError(
+            f"Mismatched column lengths when saving buffer to CSV: {lengths_check}. "
+            f"Ensure you slice all tensors to the same number of rows (e.g., buffer.ptr) "
+            f"before calling save_buffer_to_csv."
+        )
     pd.DataFrame(df_dict).to_csv(filename, index=False)
 
 
