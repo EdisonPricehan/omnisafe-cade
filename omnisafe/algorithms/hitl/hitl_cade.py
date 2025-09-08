@@ -36,17 +36,18 @@ from splashdrone4.keyboard_control import KeyboardControl
 
 
 # Types of HITL losses, 'None' means no HITL
-LossType = Literal['None', 'IWR', 'HG-DAgger', 'BT', 'DPO', 'COACH', 'CAPER']
+LossType = Literal['None', 'IWR', 'HG-DAgger', 'COACH', 'SPAR-H', 'SPAR-R', 'SPAR-P', 'SPAR-D']
 
 # Global color mapping to ensure consistent colors across all plots
 LOSS_COLORS: Dict[str, str] = {
     'None': 'black',
     'IWR': 'tab:blue',
     'HG-DAgger': 'tab:orange',
-    'BT': 'tab:green',
-    'DPO': 'tab:red',
-    'CAPER': 'tab:purple',
     'COACH': 'tab:brown',
+    'SPAR-H': 'tab:purple',
+    'SPAR-R': 'tab:gray',
+    'SPAR-P': 'tab:green',
+    'SPAR-D': 'tab:red',
 }
 
 # Custom types
@@ -807,7 +808,6 @@ class HitlCade:
 
         # Pack multiple episodes data for gru's inputs
         obs_batched, act_batched, ep_lens = self._batchify_by_episode(obs, act, done)
-        logger.warning(f'{ep_lens=}')
 
         # Filter out done data samples (usually end of an episode in simulation)
         # if self.env is not None:
@@ -838,8 +838,10 @@ class HitlCade:
         logger.info(f'Number of human corrections in episode {self.ep_num}: {int(num_human_corrections)}')
 
         # Get initial policy and reward prediction (before epoch 0)
-        with torch.no_grad():
-            if self.loss_type == 'CAPER' and caper_use_last_episode and last_episode_mask is not None:
+        with (torch.no_grad()):
+            if ((self.loss_type == 'SPAR-H' or self.loss_type == 'SPAR-R')
+                and spar_use_last_episode
+                and last_episode_mask is not None):
                 init_distribution = self.cade.forward_actor(obs[last_episode_mask], act[last_episode_mask])
             else:
                 init_distribution = self.cade.forward_actor(obs_batched, act_batched, ep_lens)
@@ -859,7 +861,7 @@ class HitlCade:
             self.cade.reward_critic_optimizer.zero_grad()  # TODO assume shared gru
 
             # Calculate loss based on different HITL loss types
-            if self.loss_type == 'CAPER':
+            if self.loss_type == 'SPAR-H' or self.loss_type == 'SPAR-R':
                 # First update reward estimator (uses only corrective pairs internally)
                 # reward_loss = self.calc_reward_estimator_loss(obs, act, act_agent, act_overlaid)
                 reward_loss = self.calc_reward_estimator_loss(obs_full, act_full, act_agent_full, act_overlaid_full)
@@ -868,7 +870,7 @@ class HitlCade:
                 logger.info('Training of reward estimator is done.')
 
                 # Use the most recent episode data to update policy
-                if caper_use_last_episode and last_episode_mask is not None and e == 0:
+                if spar_use_last_episode and last_episode_mask is not None and e == 0:
                     obs = obs[last_episode_mask]
                     act = act[last_episode_mask]
                     act_agent = act_agent[last_episode_mask]
@@ -880,21 +882,21 @@ class HitlCade:
 
                 # Policy update only on non-intervened steps
                 non_intervened_mask = (act_overlaid == 0)
-                if caper_use_non_intervened_only and non_intervened_mask.sum() == 0:
+                if spar_use_non_intervened_only and non_intervened_mask.sum() == 0:
                     logger.warning('All steps are human intervened; skip CAPER policy update this epoch.')
                     continue
 
-                if caper_use_last_episode:
+                if spar_use_last_episode:
                     obs_batched, act_batched = obs.clone().unsqueeze(0), act.clone().unsqueeze(0)
 
                 if freeze_gru:  # Only update heads
                     distribution = self.cade.forward_actor(obs_batched, act_batched,
-                                                           ep_lens=None if caper_use_last_episode else ep_lens)
+                                                           ep_lens=None if spar_use_last_episode else ep_lens)
                     reward_pred = self.cade.forward_reward(obs_batched, act_batched,
-                                                           ep_lens=None if caper_use_last_episode else ep_lens)
+                                                           ep_lens=None if spar_use_last_episode else ep_lens)
                 else:
                     distribution, reward_pred = self.cade.forward_actor_reward(obs_batched, act_batched,
-                                                                ep_lens=None if caper_use_last_episode else ep_lens)
+                                                                ep_lens=None if spar_use_last_episode else ep_lens)
 
                 # Calculate reward-to-go advantage
                 reward_adv = self.calc_reward_adv(reward_pred[0])
@@ -906,10 +908,10 @@ class HitlCade:
                     act,
                     logp,
                     reward_adv,
-                    mask=non_intervened_mask if caper_use_non_intervened_only else None,
+                    mask=non_intervened_mask if spar_use_non_intervened_only else None,
                 )
 
-                if caper_use_bt:
+                if self.loss_type == 'SPAR-H':
                     # Add BT loss on intervened steps
                     bt_loss = self.bt_loss(
                         distribution,
@@ -943,9 +945,9 @@ class HitlCade:
                     loss = self.weighted_bc_loss(distribution, act, act_overlaid, hg_dagger=True)
                 elif self.loss_type == 'IWR':
                     loss = self.weighted_bc_loss(distribution, act, act_overlaid, hg_dagger=False)
-                elif self.loss_type == 'BT':
+                elif self.loss_type == 'SPAR-P':
                     loss = self.bt_loss(distribution, act, act_agent, act_overlaid)
-                elif self.loss_type == 'DPO':
+                elif self.loss_type == 'SPAR-D':
                     loss = self.dpo_loss(distribution, init_distribution, act, act_agent, act_overlaid, beta=1.0)
                 else:
                     raise NotImplementedError(f'Loss {self.loss_type} is not supported.')
@@ -1608,7 +1610,7 @@ def eval_integral_retrained_ckpts(model_path: str, loss_type: LossType) -> None:
             eval_episodes=eval_episodes,
             deterministic=deterministic,
             save_path=save_path,
-            save_buffer=False,
+            save_buffer=save_buffer,
             difficulty=difficulty,
             retrain_epoch=retrain_epoch,  # NOT USED
             loss_type=loss_type,  # NOT USED
@@ -1685,7 +1687,7 @@ def plot_stat_loss_types(stat: Loss2RewStep, plot_ratio: bool = False) -> None:
     canonical_order: List[str] = list(get_args(LossType))
     ordered_losses: List[str] = [lt for lt in canonical_order if lt in stat]
 
-    fig, ax = plt.subplots(figsize=(6, 4.5))
+    fig, ax = plt.subplots(figsize=(6.2, 4.5))
 
     metric: str = ''
     for loss_name in ordered_losses:
@@ -1953,7 +1955,7 @@ def plot_all_loss_type_ckpt_rewards(
         ax.set_xticks(sorted(all_episode_ids))
     ax.set_xlabel('Episode ID', fontweight='bold')
     ax.set_ylabel(ylabel, fontweight='bold')
-    legend = ax.legend()
+    legend = ax.legend(loc='upper left')
     if legend:
         for text in legend.get_texts():
             text.set_fontweight('bold')
@@ -1988,6 +1990,7 @@ if __name__ == '__main__':
     # model_name: str = 'epoch-600.pt'  # Start point of CADE model
     # model_name: str = 'epoch-850.pt'  # Start point of CADE model
     # model_name: str = 'epoch-100.pt'  # Start point of CADE model
+    # model_name: str = 'sim-episode-004-hitl-False-loss-CAPER.pt'
 
     # Specify the difficulty level of the environment
     difficulty: int = 1  # [0, 2], different difficulty levels of env
@@ -1998,38 +2001,39 @@ if __name__ == '__main__':
     # save_path: str = 'evaluations/deterministic'  # Loading and saving path of all files
     # save_path: str = 'evaluations/non_deterministic_cumu_buffer'  # Loading and saving path of all files
     save_path: str = f'evaluations/non_deterministic_cumu_buffer_level{difficulty}'  # Loading and saving path of all files
+    # save_path: str = f'evaluations/caper_eval_level{difficulty}'  # Loading and saving path of all files
 
     # Specify the directory to save demonstration episodes with human interventions
     demo_path: str = 'evaluations/hitl_demo'
 
     # Specify which HITL loss to use during retraining
-    # Choose from {'None', 'IWR', 'HG-DAgger', 'BT', 'DPO', 'COACH', 'CAPER'}
+    # Choose from {'None', 'IWR', 'HG-DAgger', 'COACH', 'SPAR-H', 'SPAR-R', 'SPAR-P', 'SPAR-D'}
     # loss_type: LossType = 'None'
-    loss_type: LossType = 'CAPER'
-    # loss_type: LossType = 'IWR'
-    # loss_type: LossType = 'HG-DAgger'
-    # loss_type: LossType = 'BT'
-    # loss_type: LossType = 'DPO'
-    # loss_type: LossType = 'COACH'
+    # loss_type: LossType = 'IWR'  # IL
+    # loss_type: LossType = 'HG-DAgger'  # IL
+    # loss_type: LossType = 'COACH'  # RL
+    # loss_type: LossType = 'SPAR-H'  # Hybrid BT losses
+    loss_type: LossType = 'SPAR-R'  # BT loss on reward estimator only + RL
+    # loss_type: LossType = 'SPAR-P'  # BT loss on policy only
+    # loss_type: LossType = 'SPAR-D'  # DPO loss on policy only
 
     save_buffer: bool = False  # Whether save per-step data into file
     eval_episodes: int = 5  # Evaluation episodes number
     deterministic: bool = False  # Determinism of the actor policy in CADE
     buffer_size: int = 100  # Max length of an episode (on-policy buffer)
-    retrain_epoch: int = 5  # Number of epochs to retrain CADE
+    retrain_epoch: int = 10  # Number of epochs to retrain CADE
     enable_hitl: bool = False  # Will allow human interaction during evaluation if True
     enable_retrain: bool = False  # Whether retrain CADE if hitl is enabled
     save_ckpts: bool = True  # Whether save checkpoints of retrained CADE
     use_cumulative_buffer: bool = True  # Whether use cumulative buffer for integral retrain
-    caper_use_non_intervened_only: bool = True  # Whether use non-intervened actions only in CAPER loss calculation
-    caper_use_last_episode: bool = False  # Whether use the last episode only in CAPER for policy loss calculation
-    caper_use_bt: bool = True  # Whether use BT loss in CAPER
+    spar_use_non_intervened_only: bool = True  # Whether use non-intervened actions only in CAPER loss calculation
+    spar_use_last_episode: bool = False  # Whether use the last episode only in CAPER for policy loss calculation
     freeze_gru: bool = True  # Whether freeze GRU parameters during retraining
 
-    evaluate: bool = True  # Whether evaluate the trained policy or test the retrain function
+    evaluate: bool = False  # Whether evaluate the trained policy or test the retrain function
     evaluate_single: bool = False  # Whether evaluate single CADE model or multiple CADE models
     retrain_single: bool = False  # Whether retrain from single episodes or multiple episodes (integral retrain)
-    plot_comp: bool = False  # Whether plot statistic comparisons
+    plot_comp: bool = True  # Whether plot statistic comparisons
 
     if evaluate:
         if evaluate_single:
@@ -2080,13 +2084,13 @@ if __name__ == '__main__':
             hitl_cade.retrain(hitl_cade.buffer.get(), epoch=retrain_epoch)
             hitl_cade.close()
         else:
-            # pass
-            integral_retrain(
-                demo_path=demo_path,
-                save_path=save_path,
-                loss_type=loss_type,
-                use_cumulative=use_cumulative_buffer,
-            )
+            pass
+            # integral_retrain(
+            #     demo_path=demo_path,
+            #     save_path=save_path,
+            #     loss_type=loss_type,
+            #     use_cumulative=use_cumulative_buffer,
+            # )
 
         if plot_comp:
             # Plot statistics of the last integrally trained checkpoint as bar plot
