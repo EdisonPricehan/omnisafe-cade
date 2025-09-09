@@ -53,6 +53,11 @@ LOSS_COLORS: Dict[str, str] = {
 # Custom types
 Loss2RewStep: type = Dict[str, Tuple[List[float], List[int]]]
 
+use_cumulative_buffer: bool = True  # Whether use cumulative buffer for integral retrain
+spar_use_non_intervened_only: bool = True  # Whether use non-intervened actions only in CAPER loss calculation
+spar_use_last_episode: bool = False  # Whether use the last episode only in CAPER for policy loss calculation
+freeze_gru: bool = True  # Whether freeze GRU parameters during retraining
+
 
 class HitlCade:
     def __init__(
@@ -145,6 +150,9 @@ class HitlCade:
             stat_file_name: str = f'{env_name}_hitl{self.enable_hitl}_seed{self.seed}_difficulty{self.difficulty}_loss{self.loss_type}.csv'
             self.stat_file_path: str = os.path.join(self.save_path, stat_file_name)
 
+        # Load model configs (but only algo_cfgs and model_cfgs are used)
+        self.cfgs: Config = self.load_cfgs()
+
         # Init env
         if self.env_id is not None:
             self.setup_env()
@@ -152,8 +160,8 @@ class HitlCade:
         else:
             logger.info('Real world riverine environment is used.')
             self.env = None
-            self.obs_space: OmnisafeSpace = HitlCade.gen_obs_space()
-            self.act_space: OmnisafeSpace = HitlCade.gen_act_space()
+            self.obs_space: OmnisafeSpace = self.gen_obs_space()
+            self.act_space: OmnisafeSpace = self.gen_act_space()
 
             # Init keyboard controller of Splashdrone4
             self.keyboard_control = KeyboardControl(save_data=True, data_len=buffer_size, debug=self.debug)
@@ -182,9 +190,6 @@ class HitlCade:
         # Scan and load historical buffer data if available during deployment
         if self.env_id is None and self.load_buffer_at_init:
             self.load_buffer_from_files()
-
-        # Load model configs (but only algo_cfgs and model_cfgs are used)
-        self.cfgs: Config = self.load_cfgs()
 
         # Load model
         self.cade = self.load_model()
@@ -271,13 +276,11 @@ class HitlCade:
 
         logger.info(f'Random seed set to {seed}')
 
-    @staticmethod
-    def gen_obs_space() -> OmnisafeSpace:
+    def gen_obs_space(self) -> OmnisafeSpace:
         return MultiBinary(16 * 16)
 
-    @staticmethod
-    def gen_act_space() -> OmnisafeSpace:
-        return MultiDiscrete([3, 3, 3, 3])
+    def gen_act_space(self) -> OmnisafeSpace:
+        return MultiDiscrete([3, 3, 2, 3]) if self.cfgs.model_cfgs.block_backward_action else MultiDiscrete([3, 3, 3, 3])
 
     def setup_env(self):
         """
@@ -1292,8 +1295,6 @@ class HitlCade:
         focops_lam = self.cfgs.algo_cfgs.focops_lam
         focops_eta = self.cfgs.algo_cfgs.focops_eta
         loss_vec = (kl - (1 / focops_lam) * ratio * adv) * (kl.detach() <= focops_eta).float()
-        # loss_vec = (-ratio * adv) * (kl.detach() <= focops_eta).float()  # TODO remove kl term?
-        # loss_vec = -ratio * adv  # TODO remove kl entirely?
         return loss_vec.mean()
 
     def weighted_bc_loss(
@@ -2086,10 +2087,7 @@ if __name__ == '__main__':
     enable_hitl: bool = False  # Will allow human interaction during evaluation if True
     enable_retrain: bool = False  # Whether retrain CADE if hitl is enabled
     save_ckpts: bool = True  # Whether save checkpoints of retrained CADE
-    use_cumulative_buffer: bool = True  # Whether use cumulative buffer for integral retrain
-    spar_use_non_intervened_only: bool = True  # Whether use non-intervened actions only in CAPER loss calculation
-    spar_use_last_episode: bool = False  # Whether use the last episode only in CAPER for policy loss calculation
-    freeze_gru: bool = True  # Whether freeze GRU parameters during retraining
+
 
     evaluate: bool = False  # Whether evaluate the trained policy or test the retrain function
     evaluate_single: bool = False  # Whether evaluate single CADE model or multiple CADE models
