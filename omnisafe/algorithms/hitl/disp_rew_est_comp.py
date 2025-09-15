@@ -328,7 +328,7 @@ if __name__ == '__main__':
 
         compare_caper_reward_on_episode(
             model_dir='/home/edison/Research/omnisafe_zjy/examples/runs/FOCOPS_CADE-{medium}/seed-042-2025-08-21-15-47-02',
-            model_name='sim-episode-004-hitl-False-loss-CAPER.pt',
+            model_name='sim-episode-004-hitl-False-loss-SPAR-H.pt',
             episode_csv_relpath=csv_rel,
             use_agent_actions=False,
             device='cpu',
