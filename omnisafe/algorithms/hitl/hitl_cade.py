@@ -11,6 +11,10 @@ import numpy as np
 import pandas as pd
 from typing import Optional, List, Tuple, Dict, Any, Literal, Union, get_args
 from gymnasium.spaces import Discrete, MultiDiscrete, MultiBinary
+import matplotlib as mpl
+mpl.rcParams['pdf.fonttype'] = 42   # TrueType instead of Type 3
+mpl.rcParams['ps.fonttype']  = 42
+mpl.rcParams['text.usetex']  = False
 import matplotlib.pyplot as plt
 from loguru import logger
 logger.remove()

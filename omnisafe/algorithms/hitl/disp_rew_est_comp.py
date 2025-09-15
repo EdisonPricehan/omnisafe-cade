@@ -8,6 +8,11 @@ import pandas as pd
 import torch
 from gymnasium.spaces import MultiBinary, MultiDiscrete
 import matplotlib.pyplot as plt
+import matplotlib as mpl
+mpl.rcParams['pdf.fonttype'] = 42   # TrueType instead of Type 3
+mpl.rcParams['ps.fonttype']  = 42
+mpl.rcParams['text.usetex']  = False
+mpl.rcParams['axes.labelweight'] = 'bold'  # Make axis labels bold by default
 
 from omnisafe.utils.config import Config
 from omnisafe.models.actor_critic import ConstraintActorDynamicsEstimator
@@ -170,7 +175,7 @@ def plot_reward_comparison(
     if title:
         plt.title(title)
     plt.grid(True, linestyle='--', alpha=0.3)
-    plt.legend()
+    plt.legend(prop={'weight': 'bold'})
     plt.tight_layout()
 
     if save_path is not None:
@@ -313,7 +318,7 @@ def compare_caper_reward_on_episode(
 if __name__ == '__main__':
     # Defaults matching the issue description
     try:
-        ep_id: int = 0  # Change to [0, 1, 2, 3, 4] to test different episodes
+        ep_id: int = 4  # Change to [0, 1, 2, 3, 4] to test different episodes
 
         # Plot and save a figure next to the CSV for convenience
         csv_rel = os.path.join('evaluations', 'hitl_demo', f'medium_hitlTrue_lossNone_episode{ep_id:03d}.csv')
