@@ -125,6 +125,8 @@ class HitlCade:
 
         # Variables
         self.ep_num: int = 0
+        if save_rgb_to_buffer:
+            self.rgb_buffer: List[np.ndarray] = []
 
         # Define stat file path for all eval episodes
         # Stat includes: episodic reward, episodic cost, episodic steps
@@ -409,6 +411,48 @@ class HitlCade:
         save_buffer_to_csv(data=data, filename=filename)
         logger.info(f'Buffer data of episode {self.ep_num} is saved to {filename}.')
 
+    def save_images(self):
+        """Save RGB images from the buffer to a directory under save_path.
+        Directory name includes the loss type and the evaluation episode id.
+        Images are saved as rgb001.png, rgb002.png, ...
+        """
+        # If rgb buffer is not prepared or empty, skip
+        if not hasattr(self, 'rgb_buffer') or not self.rgb_buffer:
+            logger.warning('Enable save_rgb_to_buffer to store RGB frames into buffer before saving.')
+            return
+        if self.save_path is None:
+            logger.warning('save_path is None; cannot save RGB images.')
+            return
+
+        # Compose directory name: optionally include env id for clarity
+        env_prefix = f"{self.env_id}_" if self.env_id is not None else ""
+        folder_name = f"{env_prefix}loss{self.loss_type}_episode{self.ep_num:03}"
+        dirpath = os.path.join(self.save_path, folder_name)
+        os.makedirs(dirpath, exist_ok=True)
+
+        saved = 0
+        for idx, img in enumerate(self.rgb_buffer, start=1):
+            if img is None:
+                continue
+            # Convert RGB to BGR for OpenCV saving if needed
+            img_to_save = img
+            try:
+                if isinstance(img_to_save, np.ndarray) and img_to_save.ndim == 3 and img_to_save.shape[-1] == 3:
+                    img_to_save = img_to_save[:, :, ::-1]  # RGB -> BGR
+                filename = os.path.join(dirpath, f"rgb{idx:03}.png")
+                ok = cv2.imwrite(filename, img_to_save)
+                if ok:
+                    saved += 1
+                else:
+                    logger.warning(f'Failed to save image to {filename}.')
+            except Exception as e:
+                logger.warning(f'Exception saving image {idx}: {e}')
+
+        logger.info(f'Saved {saved}/{len(self.rgb_buffer)} RGB images to {dirpath}.')
+        # Clear buffer after saving to prevent duplication across episodes
+        self.rgb_buffer.clear()
+
+
     def close(self) -> None:
         """
         Close the environment, optionally close keyboard reader.
@@ -491,6 +535,9 @@ class HitlCade:
                     obs = obs.unsqueeze(0)
                 elif obs.dim() == 3:
                     obs = obs.squeeze(0)
+
+                if save_rgb_to_buffer:
+                    self.rgb_buffer.append(info['rgb'])
 
                 # Step CADE
                 # obs.shape=torch.Size([1, 256]), last_action.shape=torch.Size([1, 4]), latent.shape=torch.Size([1, 64])
@@ -583,6 +630,10 @@ class HitlCade:
                     if self.save_buffer:
                         self.save_buffer_to_file()
 
+                    # Save rgb images in the buffer to directory
+                    if save_rgb_to_buffer and hasattr(self, 'rgb_buffer') and self.rgb_buffer:
+                        self.save_images()
+
                     # Update stats
                     ep_rew_list.append(ep_rew)
                     ep_cost_list.append(ep_cost)
@@ -597,7 +648,6 @@ class HitlCade:
                         self.retrain(data=data, epoch=self.retrain_epoch)
 
                     # Clear the buffer
-                    # TODO Might allow buffer to store multiple episodes data?
                     self.buffer.clear()
 
         except KeyboardInterrupt:
@@ -851,7 +901,7 @@ class HitlCade:
                 init_distribution = self.cade.forward_actor(obs_batched, act_batched, ep_lens)
         assert isinstance(init_distribution, List), f'Currently only support multi-discrete action space.'
 
-        # Store the data (episodes up to now) for CAPER retraining of reward estimator
+        # Store the data (episodes up to now) for SPAR retraining of reward estimator
         obs_full = obs.clone()
         act_full = act.clone()
         act_agent_full = act_agent.clone()
@@ -881,13 +931,13 @@ class HitlCade:
                     act_overlaid = act_overlaid[last_episode_mask]
                     logp = logp[last_episode_mask]
                     if not act_overlaid.any():
-                        logger.warning('No human corrections in the last episode; skip CAPER policy update this epoch.')
+                        logger.warning('No human corrections in the last episode; skip SPAR policy update this epoch.')
                         continue
 
                 # Policy update only on non-intervened steps
                 non_intervened_mask = (act_overlaid == 0)
                 if spar_use_non_intervened_only and non_intervened_mask.sum() == 0:
-                    logger.warning('All steps are human intervened; skip CAPER policy update this epoch.')
+                    logger.warning('All steps are human intervened; skip SPAR policy update this epoch.')
                     continue
 
                 if spar_use_last_episode:
@@ -1840,7 +1890,7 @@ def plot_all_loss_type_ckpt_rewards(
     all_files = [f for f in os.listdir(metrics_dir) if f.endswith('.csv')]
 
     # Canonical ordering taken directly from LossType Literal definition
-    canonical_order: List[str] = list(get_args(LossType))  # ['None','IWR','HG-DAgger','BT','DPO','COACH','CAPER']
+    canonical_order: List[str] = list(get_args(LossType))
 
     if loss_types is None:
         # Infer which loss types appear, but keep canonical order
@@ -1988,14 +2038,6 @@ if __name__ == '__main__':
     # model_dir: str = '/home/edison/Research/omnisafe_zjy/examples/runs/FOCOPS_CADE-{medium}/seed-000-2025-08-19-20-40-41'  # Base CADE model
     model_dir: str = '/home/edison/Research/omnisafe_zjy/examples/runs/FOCOPS_CADE-{medium}/seed-042-2025-08-21-15-47-02'  # Base CADE model
 
-    # Specify the name of CADE model checkpoint
-    # model_name: str = 'epoch-350.pt'  # Start point of CADE model
-    model_name: str = 'epoch-1000.pt'  # Start point of CADE model
-    # model_name: str = 'epoch-600.pt'  # Start point of CADE model
-    # model_name: str = 'epoch-850.pt'  # Start point of CADE model
-    # model_name: str = 'epoch-100.pt'  # Start point of CADE model
-    # model_name: str = 'sim-episode-004-hitl-False-loss-CAPER.pt'
-
     # Specify the difficulty level of the environment
     difficulty: int = 1  # [0, 2], different difficulty levels of env
 
@@ -2017,27 +2059,36 @@ if __name__ == '__main__':
     # loss_type: LossType = 'HG-DAgger'  # IL
     # loss_type: LossType = 'COACH'  # RL
     # loss_type: LossType = 'SPAR-H'  # Hybrid BT losses
-    loss_type: LossType = 'SPAR-R'  # BT loss on reward estimator only + RL
+    # loss_type: LossType = 'SPAR-R'  # BT loss on reward estimator only + RL
     # loss_type: LossType = 'SPAR-P'  # BT loss on policy only
-    # loss_type: LossType = 'SPAR-D'  # DPO loss on policy only
+    loss_type: LossType = 'SPAR-D'  # DPO loss on policy only
 
-    save_buffer: bool = False  # Whether save per-step data into file
+    # Specify the name of CADE model checkpoint
+    # model_name: str = 'epoch-350.pt'  # Start point of CADE model
+    # model_name: str = 'epoch-1000.pt'  # Start point of CADE model
+    # model_name: str = 'epoch-600.pt'  # Start point of CADE model
+    # model_name: str = 'epoch-850.pt'  # Start point of CADE model
+    # model_name: str = 'epoch-100.pt'  # Start point of CADE model
+    model_name: str = f'sim-episode-004-hitl-False-loss-{loss_type}.pt'
+
+    save_buffer: bool = True  # Whether save per-step data into file
+    save_rgb_to_buffer: bool = True  # Whether save RGB frames into file
     eval_episodes: int = 5  # Evaluation episodes number
     deterministic: bool = False  # Determinism of the actor policy in CADE
-    buffer_size: int = 100  # Max length of an episode (on-policy buffer)
+    buffer_size: int = 1000  # Max length of an episode (on-policy buffer)
     retrain_epoch: int = 10  # Number of epochs to retrain CADE
     enable_hitl: bool = False  # Will allow human interaction during evaluation if True
     enable_retrain: bool = False  # Whether retrain CADE if hitl is enabled
-    save_ckpts: bool = True  # Whether save checkpoints of retrained CADE
+    save_ckpts: bool = False  # Whether save checkpoints of retrained CADE
     use_cumulative_buffer: bool = True  # Whether use cumulative buffer for integral retrain
-    spar_use_non_intervened_only: bool = True  # Whether use non-intervened actions only in CAPER loss calculation
-    spar_use_last_episode: bool = False  # Whether use the last episode only in CAPER for policy loss calculation
+    spar_use_non_intervened_only: bool = True  # Whether use non-intervened actions only in SPAR loss calculation
+    spar_use_last_episode: bool = False  # Whether use the last episode only in SPAR for policy loss calculation
     freeze_gru: bool = True  # Whether freeze GRU parameters during retraining
 
-    evaluate: bool = False  # Whether evaluate the trained policy or test the retrain function
-    evaluate_single: bool = False  # Whether evaluate single CADE model or multiple CADE models
+    evaluate: bool = True  # Whether evaluate the trained policy or test the retrain function
+    evaluate_single: bool = True  # Whether evaluate single CADE model or multiple CADE models
     retrain_single: bool = False  # Whether retrain from single episodes or multiple episodes (integral retrain)
-    plot_comp: bool = True  # Whether plot statistic comparisons
+    plot_comp: bool = False  # Whether plot statistic comparisons
 
     if evaluate:
         if evaluate_single:
