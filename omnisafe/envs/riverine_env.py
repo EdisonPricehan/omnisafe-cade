@@ -224,6 +224,7 @@ class RiverineEnv(CMDP):
                                        for x in (obs_vec, rew, cost, term, trunc))
 
         new_info = {'final_observation': obs_vec}
+        new_info['rgb'] = self.rgb
         if hasattr(info['step'], 'done_reason'):
             # print(f'riverine env done reason: {info["step"].done_reason}')
             new_info['done_reason'] = info['step'].done_reason[0]
@@ -279,7 +280,7 @@ class RiverineEnv(CMDP):
         #
         # obs = obs[:self._obs_len]
 
-        return torch.Tensor(obs), {}
+        return torch.Tensor(obs), {'rgb': self.rgb}
 
     def get_vae_embedding(self) -> np.ndarray:
         """
