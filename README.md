@@ -38,6 +38,18 @@ Reward estimates of Cp4 (final checkpoint) on Ep0 for $a^\text{a}$. SPAR-H eleva
 Reward estimates of Cp4 on Ep4 for $a^\text{e}$. Human-approved actions form peaks, showing stable alignment over multiple updates.
 
 
+## Real-world Deployment
+![](images/wabash_river_following.svg)
+![](images/intervention_rate.svg)
+
+Five HITL trajectories during deployment with SPAR-H.
+Green dots: executed agent-proposed actions.
+Red dots: human overrides.
+Orange dots: trajectory ends.
+Bottom: moving averaged intervention rate per 50 steps.
+Interventions taper across sorties as the policy adapts online.
+
+
 If you find our work useful in your research, please cite our paper:
 ```
 @article{wang2025deployable,
