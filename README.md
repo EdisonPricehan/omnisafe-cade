@@ -142,3 +142,15 @@ then run
 python examples/eval_cade.py
 ```
 
+## Reference
+If you find our work useful, please cite
+```
+@article{wang2026vision,
+  title={Vision-driven river following of UAV via safe reinforcement learning using semantic dynamics model},
+  author={Wang, Zihan and Mahmoudian, Nina},
+  journal={Robotics and Autonomous Systems},
+  pages={105357},
+  year={2026},
+  publisher={Elsevier}
+}
+```
