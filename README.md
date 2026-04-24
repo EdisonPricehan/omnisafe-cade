@@ -16,7 +16,7 @@ Imitation learning methods mainly use weighted behavior cloning on the human-int
 
 
 ## Video Introduction
-https://github.com/user-attachments/assets/5c140fda-e5aa-4dad-8cb0-fe042adaabe1
+[![Demo Video](https://img.youtube.com/vi/27oiO93C8mE/maxresdefault.jpg)](https://youtu.be/27oiO93C8mE)
 
 
 ## Image-to-action Pipeline
